@@ -199,7 +199,7 @@
      :request "launch"
      :cwd dape-cwd-fn
      :program dape-find-file
-     :stopAtEntry t))
+     :stopAtEntry nil))
   "This variable holds the Dape configurations as an alist.
 In this alist, the car element serves as a symbol identifying each
 configuration.  Each configuration, in turn, is a property list (plist)
@@ -266,8 +266,12 @@ Functions and symbols in configuration:
                  (const :tag "Left side" left)
                  (const :tag "Right side" right)))
 
-(defcustom dape-on-start-hooks '(dape-repl)
+(defcustom dape-on-start-hooks '(dape-repl dape-info)
   "Hook to run on session start."
+  :type 'hook)
+
+(defcustom dape-on-stopped-hooks '()
+  "Hook to run on session stopped."
   :type 'hook)
 
 (defcustom dape-update-ui-hooks '(dape-info-update)
@@ -770,6 +774,11 @@ If NOWARN does not error on no active process."
 (defun dape--process-sentinel (process _msg)
   "Sentinel for Dape processes."
   (unless (process-live-p process)
+    ;; Flush stdout contents
+    (when-let* ((buffer (process-buffer process))
+                ((buffer-live-p buffer)))
+      (with-current-buffer buffer
+        (dape--debug 'io "Flushing io buffer:\n%s" (buffer-string))))
     (dape--remove-stack-pointers)
     ;; Clean mode-line after 2 seconds
     (run-with-timer 2 nil (lambda ()
@@ -1367,7 +1376,8 @@ Starts a new process as per request of the debug adapter."
     (dape--repl-message (mapconcat 'identity texts "\n")
                         (when (equal "exception"
                                    (plist-get body :reason))
-                            'error))))
+                          'error)))
+  (run-hooks 'dape-on-stopped-hooks))
 
 (cl-defmethod dape-handle-event (_process (_event (eql continued)) body)
   "Handle continued events."
@@ -1437,7 +1447,7 @@ Starts a new process as per request of the debug adapter."
 
 (defun dape--start-multi-session (config)
   "Start multi session for CONFIG."
-  (dape--debug 'info "Starting new multi session")
+  (dape--debug 'info "Starting new multi session with config:\n%S" config)
   (let ((buffer (dape--get-buffer))
         (default-directory (or (plist-get config 'command-cwd)
                                default-directory))
@@ -1484,7 +1494,7 @@ Starts a new process as per request of the debug adapter."
 
 (defun dape--start-single-session (config)
   "Start single session for CONFIG."
-  (dape--debug 'info "Starting new single session")
+  (dape--debug 'info "Starting new single session with config:\n%S" config)
   (let ((buffer (dape--get-buffer))
         (default-directory (or (plist-get config 'command-cwd)
                                default-directory))
@@ -1536,6 +1546,7 @@ Starts a new process as per request of the debug adapter."
   (when (hash-table-p dape--timers)
     (dolist (timer (hash-table-values dape--timers))
       (cancel-timer timer)))
+  (dape--remove-stack-pointers)
   (cond
    ((and (dape--live-process t)
          (plist-get dape--capabilities :supportsRestartRequest))
@@ -2113,93 +2124,96 @@ Handles newline."
 
 (defun dape--repl-completion-at-point ()
   "Completion at point function for *dape-repl* buffer."
-  ;; FIXME repl completion needs some work :completionTriggerCharacters
-  (let* ((bounds (save-excursion
-                   (cons (and (skip-chars-backward "^\s")
-                              (point))
-                         (and (skip-chars-forward "^\s")
-                              (point)))))
-         (column (1+ (- (cdr bounds) (car bounds))))
-         (str (buffer-substring-no-properties
-               (car bounds)
-               (cdr bounds)))
-         (collection
-          (mapcar (lambda (cmd)
-                    (cons (car cmd)
-                          (format " %s"
-                                  (propertize (symbol-name (cdr cmd))
-                                              'face 'font-lock-builtin-face))))
-                  dape-repl-commands))
-         done)
-    (list
-     (car bounds)
-     (cdr bounds)
-     (completion-table-dynamic
-      (lambda (_str)
-        (when-let ((process (dape--live-process t)))
-          (dape--with dape-request (process
-                                    "completions"
-                                    (append
-                                     (when (dape--stopped-threads)
-                                       (list :frameId
-                                             (plist-get (dape--current-stack-frame) :id)))
-                                     (list
-                                      :text str
-                                      :column column
-                                      :line 1)))
-            (setq collection
-                  (append
-                   collection
-                   (mapcar
-                    (lambda (target)
-                      (cons
-                       (cond
-                        ((plist-get target :text)
-                         (plist-get target :text))
-                        ((and (plist-get target :label)
-                              (plist-get target :start))
-                         (let ((label (plist-get target :label))
-                               (start (plist-get target :start)))
-                           (concat (substring str 0 start)
-                                   label
-                                   (substring str
-                                              (thread-first
-                                                target
-                                                (plist-get :length)
-                                                (+ 1 start)
-                                                (min (length str)))))))
-                        ((and (plist-get target :label)
-                              (memq (aref str (1- (length str))) '(?. ?/ ?:)))
-                         (concat str (plist-get target :label)))
-                        ((and (plist-get target :label)
-                              (length> (plist-get target :label)
-                                       (length str)))
-                         (plist-get target :label))
-                        ((and (plist-get target :label)
-                              (length> (plist-get target :label)
-                                       (length str)))
-                         (cl-loop with label = (plist-get target :label)
-                                  for i downfrom (1- (length label)) downto 1
-                                  when (equal (substring str (- (length str) i))
-                                              (substring label 0 i))
-                                  return (concat str (substring label i))
-                                  finally return label)))
-                       (when-let ((type (plist-get target :type)))
-                         (format " %s"
-                                 (propertize type
-                                             'face 'font-lock-type-face)))))
-                    (plist-get body :targets))))
-            (setq done t))
-          (while-no-input
-            (while (not done)
-              (accept-process-output nil 0 1))))
-        collection))
-     :annotation-function
-     (lambda (str)
-       (when-let ((annotation
-                   (alist-get (substring-no-properties str) collection
-                              nil nil 'equal)))
-         annotation)))))
+  (when (or (symbol-at-point)
+            (member (buffer-substring-no-properties (1- (point)) (point))
+                    (or (plist-get dape--capabilities :completionTriggerCharacters)
+                        '("."))))
+    (let* ((bounds (save-excursion
+                     (cons (and (skip-chars-backward "^\s")
+                                (point))
+                           (and (skip-chars-forward "^\s")
+                                (point)))))
+           (column (1+ (- (cdr bounds) (car bounds))))
+           (str (buffer-substring-no-properties
+                 (car bounds)
+                 (cdr bounds)))
+           (collection
+            (mapcar (lambda (cmd)
+                      (cons (car cmd)
+                            (format " %s"
+                                    (propertize (symbol-name (cdr cmd))
+                                                'face 'font-lock-builtin-face))))
+                    dape-repl-commands))
+           done)
+      (list
+       (car bounds)
+       (cdr bounds)
+       (completion-table-dynamic
+        (lambda (_str)
+          (when-let ((process (dape--live-process t)))
+            (dape--with dape-request (process
+                                      "completions"
+                                      (append
+                                       (when (dape--stopped-threads)
+                                         (list :frameId
+                                               (plist-get (dape--current-stack-frame) :id)))
+                                       (list
+                                        :text str
+                                        :column column
+                                        :line 1)))
+              (setq collection
+                    (append
+                     collection
+                     (mapcar
+                      (lambda (target)
+                        (cons
+                         (cond
+                          ((plist-get target :text)
+                           (plist-get target :text))
+                          ((and (plist-get target :label)
+                                (plist-get target :start))
+                           (let ((label (plist-get target :label))
+                                 (start (plist-get target :start)))
+                             (concat (substring str 0 start)
+                                     label
+                                     (substring str
+                                                (thread-first
+                                                  target
+                                                  (plist-get :length)
+                                                  (+ 1 start)
+                                                  (min (length str)))))))
+                          ((and (plist-get target :label)
+                                (memq (aref str (1- (length str))) '(?. ?/ ?:)))
+                           (concat str (plist-get target :label)))
+                          ((and (plist-get target :label)
+                                (length> (plist-get target :label)
+                                         (length str)))
+                           (plist-get target :label))
+                          ((and (plist-get target :label)
+                                (length> (plist-get target :label)
+                                         (length str)))
+                           (cl-loop with label = (plist-get target :label)
+                                    for i downfrom (1- (length label)) downto 1
+                                    when (equal (substring str (- (length str) i))
+                                                (substring label 0 i))
+                                    return (concat str (substring label i))
+                                    finally return label)))
+                         (when-let ((type (plist-get target :type)))
+                           (format " %s"
+                                   (propertize type
+                                               'face 'font-lock-type-face)))))
+                      (plist-get body :targets))))
+              (setq done t))
+            (while-no-input
+              (while (not done)
+                (accept-process-output nil 0 1))))
+          collection))
+       :annotation-function
+       (lambda (str)
+         (when-let ((annotation
+                     (alist-get (substring-no-properties str) collection
+                                nil nil 'equal)))
+           annotation))))))
 
 (defvar dape-repl-mode nil)
 
@@ -2422,8 +2436,9 @@ with ARGS."
             ('dape-info-scope-mode (format "Scope <%s>" identifier))
             (_ (error "Unable to create mode from %s with %s" mode identifier)))))
 
-(defun dape--info-buffer (mode &optional identifier)
-  "Get or create info buffer with MODE and IDENTIFIER."
+(defun dape--info-buffer (mode &optional identifier skip-update)
+  "Get or create info buffer with MODE and IDENTIFIER.
+If SKIP-UPDATE is non nil skip updating buffer contents."
   (let ((buffer
          (or (dape--info-get-live-buffer mode identifier)
              (get-buffer-create (dape--info-buffer-name mode identifier)))))
@@ -2432,7 +2447,8 @@ with ARGS."
         (funcall mode)
         (setq dape--info-buffer-identifier identifier)
         (push buffer dape--info-buffers)))
-    (dape--info-buffer-update buffer)
+    (unless skip-update
+      (dape--info-buffer-update buffer))
     buffer))
 
 (defmacro dape--info-buffer-command (name properties doc &rest body)
@@ -2470,55 +2486,35 @@ FN is executed on mouse-2 and ?r, BODY is executed inside of let stmt."
 
 (defun dape-info-update ()
   "Update and display `dape-info-*' buffers."
-  (pcase (dape--live-process t)
-    ('nil
-     (let ((buffers-to-update
-            (seq-filter (lambda (buffer)
-                          (and (get-buffer-window buffer)
-                               (with-current-buffer buffer
-                                 ;; TODO Should update watch buffer
-                                 (or ;; (dape--info-buffer-p 'dape-info-watch-mode)
-                                     (dape--info-buffer-p 'dape-info-breakpoints-mode)))))
-                        (dape--info-buffer-list))))
-       (dolist (buffer buffers-to-update)
-         (dape--info-buffer-update buffer))))
-    (_
-     ;; Open and update breakpoints and threads buffer
-     (if-let ((opened-group-1-buffers
-               (seq-filter (lambda (buffer)
-                             (and (get-buffer-window buffer)
-                                  (with-current-buffer buffer
-                                    (or (dape--info-buffer-p 'dape-info-breakpoints-mode)
-                                        (dape--info-buffer-p 'dape-info-threads-mode)))))
-                           (dape--info-buffer-list))))
-         (dolist (buffer opened-group-1-buffers)
-           (dape--info-buffer-update buffer))
-       (dape--display-buffer
-        (dape--info-buffer 'dape-info-breakpoints-mode)))
-     ;; Open and update stack buffer
-     (dape--display-buffer
-      (dape--info-buffer 'dape-info-stack-mode))
-     ;; Open and update stack buffer
-     (if-let ((opened-group-2-buffers
-               (seq-filter (lambda (buffer)
-                             (and (get-buffer-window buffer)
-                                  (with-current-buffer buffer
-                                    (or (dape--info-buffer-p 'dape-info-scope-mode)
-                                        (dape--info-buffer-p 'dape-info-watch-mode)))))
-                           (dape--info-buffer-list))))
-         (dolist (buffer opened-group-2-buffers)
-           (dape--info-buffer-update buffer))
-       (dape--display-buffer
-        (dape--info-buffer 'dape-info-scope-mode 0))))))
+  (dolist (buffer (dape--info-buffer-list))
+    (dape--info-buffer-update buffer)))
+
 
 (defun dape-info ()
-  "Update and display *dape-info* buffers or close buffers."
+  "Update and display *dape-info* buffers."
   (interactive)
-  (if-let ((buffers
-            (seq-filter 'get-buffer-window (dape--info-buffer-list))))
-      (dolist (buffer buffers)
-        (kill-buffer buffer))
-    (dape-info-update)))
+  ;; Open breakpoints if not group-1 buffer displayed
+  (unless (seq-find (lambda (buffer)
+                      (and (get-buffer-window buffer)
+                           (with-current-buffer buffer
+                               (or (dape--info-buffer-p 'dape-info-breakpoints-mode)
+                                   (dape--info-buffer-p 'dape-info-threads-mode)))))
+                    (dape--info-buffer-list))
+    (dape--display-buffer
+     (dape--info-buffer 'dape-info-breakpoints-mode 'skip-update)))
+  ;; Open and update stack buffer
+  (dape--display-buffer
+   (dape--info-buffer 'dape-info-stack-mode 'skip-update))
+  ;; Open stack 0 if not group-2 buffer displayed
+  (unless (seq-find (lambda (buffer)
+                      (and (get-buffer-window buffer)
+                           (with-current-buffer buffer
+                             (or (dape--info-buffer-p 'dape-info-scope-mode)
+                                 (dape--info-buffer-p 'dape-info-watch-mode)))))
+                    (dape--info-buffer-list))
+    (dape--display-buffer
+     (dape--info-buffer 'dape-info-scope-mode 0 'skip-update)))
+  (dape-info-update))
 
 
 ;;; Info breakpoints buffer
@@ -2936,6 +2932,10 @@ CB is expected to be `dape--info-scope-update'."
   (when-let* ((process (dape--live-process t))
               (frame (dape--current-stack-frame))
               (scopes (plist-get frame :scopes))
+              ;; FIXME if scope is out of range here scope list could
+              ;;       have shrunk since last update and current
+              ;;       scope buffer should be killed and replaced if
+              ;;       if visible
               (scope (nth dape--info-buffer-identifier scopes)))
     (dape--with dape--variables (process scope)
       (dape--with dape--variables-recursive
