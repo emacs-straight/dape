@@ -2479,25 +2479,26 @@ with ARGS."
   (if dape--info-buffer-in-redraw
       (run-with-timer 0.01 nil 'dape--info-buffer-update-1
                       buffer args)
-    (let ((dape--info-buffer-in-redraw t))
-      (with-current-buffer buffer
-        ;; Would be nice with replace-buffer-contents
-        ;; But it seams to messes up string properties
-        (let ((line (line-number-at-pos (point) t))
-              (old-window (selected-window)))
-          ;; Still don't know any better way of keeping window scroll?
-          (when-let ((window (get-buffer-window buffer)))
-            (select-window window))
-          (save-window-excursion
-            (let ((inhibit-read-only t))
-              (erase-buffer)
-              (apply dape--info-buffer-update-fn args))
-            (ignore-errors
-              (goto-char (point-min))
-              (forward-line (1- line)))
-            (dape--info-set-header-line-format))
-          (when old-window
-            (select-window old-window)))))))
+    (when (buffer-live-p buffer)
+      (let ((dape--info-buffer-in-redraw t))
+        (with-current-buffer buffer
+          ;; Would be nice with replace-buffer-contents
+          ;; But it seams to messes up string properties
+          (let ((line (line-number-at-pos (point) t))
+                (old-window (selected-window)))
+            ;; Still don't know any better way of keeping window scroll?
+            (when-let ((window (get-buffer-window buffer)))
+              (select-window window))
+            (save-window-excursion
+              (let ((inhibit-read-only t))
+                (erase-buffer)
+                (apply dape--info-buffer-update-fn args))
+              (ignore-errors
+                (goto-char (point-min))
+                (forward-line (1- line)))
+              (dape--info-set-header-line-format))
+            (when old-window
+              (select-window old-window))))))))
 
 (defun dape--info-buffer-update (buffer)
   "Update dape info BUFFER."
@@ -3141,6 +3142,12 @@ Used to derive initial-contents in `dape--read-config'.")
 (defvar dape--minibuffer-suggested-configs nil
   "Suggested configurations in minibuffer.")
 
+(defun dape--plistp (object)
+  "Non-nil if and only if OBJECT is a valid plist."
+  (and-let* (((listp object))
+             (len (length object))
+             ((zerop (% len 2))))))
+
 (defun dape--config-eval-value (value &optional skip-function for-adapter)
   "Evaluate dape config VALUE.
 If SKIP-FUNCTION and VALUE is an function it is not invoked.
@@ -3149,7 +3156,8 @@ apply."
   (cond
    ((functionp value) (or (and skip-function value)
                           (funcall-interactively value)))
-   ((plistp value) (dape--config-eval-1 value skip-function for-adapter))
+   ((dape--plistp value)
+    (dape--config-eval-1 value skip-function for-adapter))
    ((vectorp value) (cl-map 'vector
                             (lambda (value)
                               (dape--config-eval-value value
@@ -3199,7 +3207,7 @@ arrays [%S ...], if meant as an object replace (%S ...) with (:%s ...)"
           str (substring str (length (symbol-name name))))
     (unless (string-empty-p str)
       (setq read-config (read (format "(%s)" str))))
-    (unless (plistp read-config)
+    (unless (dape--plistp read-config)
       (user-error "Bad options format, see `dape-configs'"))
     (cl-loop for (key value) on read-config by 'cddr
              do (setq base-config (plist-put base-config key value)))
@@ -3257,9 +3265,9 @@ arrays [%S ...], if meant as an object replace (%S ...) with (:%s ...)"
                     dape--minibuffer-suggested-configs))))
      ;; Complete config args
      ((and (alist-get key dape-configs)
-           (or (and (not (plistp args))
+           (or (and (not (dape--plistp args))
                     symbol-bounds)
-               (and (plistp args)
+               (and (dape--plistp args)
                     whitespace-bounds)))
       (let ((args (if symbol-bounds
                       (nreverse (cdr (nreverse args)))
