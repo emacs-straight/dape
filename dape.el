@@ -51,6 +51,7 @@
 (require 'tree-widget)
 (require 'project)
 (require 'gdb-mi)
+(require 'tramp)
 
 
 ;;; Custom
@@ -111,8 +112,10 @@
                          (call-process-shell-command
                           (format "%s -c \"import debugpy.adapter\"" python)))
                   (user-error "%s module debugpy is not installed" python))))
+     fn (dape-config-autoport dape-config-tramp)
      command "python3"
-     command-args ("-m" "debugpy.adapter")
+     command-args ("-m" "debugpy.adapter" "--port" :autoport)
+     port :autoport
      :request "launch"
      :type "executable"
      :cwd dape-cwd-fn
@@ -122,7 +125,7 @@
     (dlv
      modes (go-mode go-ts-mode)
      ensure dape-ensure-command
-     fn dape-config-autoport
+     fn (dape-config-autoport dape-config-tramp)
      command "dlv"
      command-args ("dap" "--listen" "127.0.0.1::autoport")
      command-cwd dape-cwd-fn
@@ -199,19 +202,44 @@
      :request "launch"
      :cwd dape-cwd-fn
      :program dape-find-file
-     :stopAtEntry nil))
+     :stopAtEntry nil)
+    (rdbg
+     modes (ruby-mode ruby-ts-mode)
+     ensure dape-ensure-command
+     command "rdbg"
+     command-args ("-O" "--host" "0.0.0.0" "--port" :autoport "-c" "--" :-c)
+     command-cwd (lambda () (funcall dape-cwd-fn t))
+     fn ((lambda (config)
+           (plist-put config 'command-args
+                      (mapcar (lambda (arg)
+                                (if (eq arg :-c)
+                                    (plist-get config '-c)
+                                  arg))
+                              (plist-get config 'command-args))))
+         dape-config-autoport
+         dape-config-tramp)
+     port :autoport
+     :type "Ruby"
+     ;; -- examples:
+     ;; rails server
+     ;; bundle exec ruby foo.rb
+     ;; bundle exec rake test
+     -c (lambda () (read-string "Invoke command: "))))
   "This variable holds the Dape configurations as an alist.
 In this alist, the car element serves as a symbol identifying each
 configuration.  Each configuration, in turn, is a property list (plist)
 where keys can be symbols or keywords.
 
 Symbol Keys (Used by Dape):
-- fn: Function takes config and returns config, used to apply changes
-      to config at runtime.
+- fn: Function or list of functions, takes config and returns config.
+  If list functions are applied in order. Used for hiding unnecessary
+  configuration details from config history.
 - ensure: Function to ensure that adapter is available.
 - command: Shell command to initiate the debug adapter.
 - command-args: List of string arguments for the command.
 - command-cwd: Working directory for the command.
+- prefix-local: Local src path prefix.
+- prefix-remote: Remote src path prefix.
 - host: Host of the debug adapter.
 - port: Port of the debug adapter.
 - modes: List of modes where the configuration is active in `dape'
@@ -373,7 +401,12 @@ left-to-right display order of the properties."
   :type 'function)
 
 (defcustom dape-cwd-fn #'dape--default-cwd
-  "Function to get current working directory."
+  "Function to get current working directory.
+The function should take one optional argument and return a string
+representing the absolute file path of the current working directory.
+If the optional argument is non nil return path with tramp prefix
+otherwise the path should be without prefix.
+See `dape--default-cwd'."
   :type 'function)
 
 (defcustom dape-compile-compile-hooks nil
@@ -428,9 +461,9 @@ The hook is run with one argument, the compilation buffer."
   "Current session configuration plist.")
 (defvar dape--timers nil
   "List of running timers.")
-(defvar dape--seq nil
+(defvar dape--seq 0
   "Session seq number.")
-(defvar dape--seq-event nil
+(defvar dape--seq-event 0
   "Session event seq number.")
 (defvar dape--cb nil
   "Hash table of request callbacks.")
@@ -520,6 +553,24 @@ Run step like COMMAND.  If ARG is set run COMMAND ARG times."
               (eq (plist-get thread :id) dape--thread-id))
             dape--threads))
 
+(defun dape--path (path format)
+  "Translate PATH to FORMAT.
+Accepted FORMAT values is `local' and `remote'."
+  (if-let* (((or (plist-member dape--config 'prefix-local)
+                 (plist-member dape--config 'prefix-remote)))
+            (prefix-local (or (plist-get dape--config 'prefix-local)
+                              ""))
+            (prefix-remote (or (plist-get dape--config 'prefix-remote)
+                               ""))
+            (mapping (pcase format
+                       ('local (cons prefix-remote prefix-local))
+                       ('remote (cons prefix-local prefix-remote))
+                       (_ (error "Unknown format")))))
+      (concat
+       (cdr mapping)
+       (string-remove-prefix (car mapping) path))
+    path))
+
 (defun dape--current-stack-frame ()
   "Current stack frame plist."
   (let* ((stack-frames (thread-first
@@ -552,6 +603,7 @@ Note requires `dape--source-ensure' if source is by reference."
                               ((buffer-live-p buffer)))
                     buffer)
                   (when-let* ((path (plist-get source :path))
+                              (path (dape--path path 'local))
                               ((file-exists-p path))
                               (buffer (find-file-noselect path t)))
                     buffer))))
@@ -583,24 +635,31 @@ If PULSE pulse on after opening file."
                                               (line-beginning-position 2)
                                               'next-error)))))))
 
-(defun dape--default-cwd ()
-  "Try to guess current project absolute file path."
-  (expand-file-name
-   (or (when-let ((project (project-current)))
-         (project-root project))
-       default-directory)))
+(defun dape--default-cwd (&optional skip-tramp-trim)
+  "Try to guess current project absolute file path.
+On SKIP-TRAMP-TRIM tramp prefix is keept in path."
+  (let ((root (or (when-let ((project (project-current)))
+                    (expand-file-name (project-root project)))
+                  default-directory)))
+    (if (and (not skip-tramp-trim) (tramp-tramp-file-p root))
+        (tramp-file-name-localname (tramp-dissect-file-name root))
+      root)))
 
 (defun dape-find-file (&optional default)
   "Read filename without any ignored extensions at project root.
 DEFAULT specifies which file to return on empty input."
-  (let ((completion-ignored-extensions nil)
-        (default-directory (funcall dape-cwd-fn)))
-    (expand-file-name
-     (read-file-name (if default
-                         (format "Program (default %s): " default)
-                       "Program: ")
-                     default-directory
-                     default t))))
+  (let* ((completion-ignored-extensions nil)
+         (default-directory (funcall dape-cwd-fn t))
+         (file
+          (expand-file-name
+           (read-file-name (if default
+                               (format "Program (default %s): " default)
+                             "Program: ")
+                           default-directory
+                           default t))))
+    (if (tramp-tramp-file-p file)
+        (tramp-file-name-localname (tramp-dissect-file-name file))
+      file)))
 
 (defun dape-find-file-buffer-default ()
   "Read filename at project root, defaulting to current buffer."
@@ -623,33 +682,50 @@ DEFAULT specifies which file to return on empty input."
     (read-number "Pid: ")))
 
 (defun dape-config-autoport (config)
-  "Replace occurences of `:autoport' in CONFIG `command-args' and `port'.
-Will replace symbol and string occurences of \"autoport\"."
+  "Replaces :autoport in CONFIG keys `command-args' and `port'.
+If `port' is `:autoport' replaces with open port, if not replaces
+with value of `port' instead.
+Replaces symbol and string occurences of \"autoport\"."
   ;; Stolen from `Eglot'
-  (let* ((port-probe (make-network-process :name "dape-port-probe-dummy"
-                                           :server t
-                                           :host "localhost"
-                                           :service 0))
-         (port-number (unwind-protect
-                          (process-contact port-probe :service)
-                        (delete-process port-probe)))
-         (port (if (eq (plist-get config 'port) :autoport)
-                   port-number
-                 (plist-get config 'port)))
-         (command-args (seq-map (lambda (item)
-                                  (cond
-                                   ((eq item :autoport)
-                                    (number-to-string port-number))
-                                   ((stringp item)
-                                    (string-replace ":autoport"
-                                                    (number-to-string port-number)
-                                                    item))))
-                                (plist-get config 'command-args))))
-    (let ((config
-           (thread-first config
-                         (plist-put 'port port)
-                         (plist-put 'command-args command-args))))
-      config)))
+  (let ((port (plist-get config 'port)))
+    (when (eq (plist-get config 'port) :autoport)
+      (let ((port-probe (make-network-process :name "dape-port-probe-dummy"
+                                              :server t
+                                              :host "localhost"
+                                              :service 0)))
+        (setq port
+              (unwind-protect
+                  (process-contact port-probe :service)
+                (delete-process port-probe)))))
+    (let ((command-args (seq-map (lambda (item)
+                                   (cond
+                                    ((eq item :autoport)
+                                     (number-to-string port))
+                                    ((stringp item)
+                                     (string-replace ":autoport"
+                                                     (number-to-string port)
+                                                     item))))
+                                 (plist-get config 'command-args))))
+          (thread-first config
+                        (plist-put 'port port)
+                        (plist-put 'command-args command-args)))))
+
+(defun dape-config-tramp (config)
+  "Apply tramp file prefix on CONFIG if started in tramp context."
+  (if-let* (((and (not (plist-get config 'prefix-local))
+                  (not (plist-get config 'prefix-remote))
+                  (plist-get config 'command)))
+            (default-directory (or (plist-get config 'command-cwd)
+                                   default-directory))
+            ((tramp-tramp-file-p default-directory))
+            (parts (tramp-dissect-file-name default-directory))
+            (tramp-prefix
+             (tramp-completion-make-tramp-file-name (tramp-file-name-method parts)
+                                                    (tramp-file-name-user parts)
+                                                    (tramp-file-name-host parts)
+                                                    "")))
+      (plist-put config 'prefix-local tramp-prefix)
+    config))
 
 (defun dape-ensure-command (config)
   "Ensure that `command' from CONFIG exist system."
@@ -1011,7 +1087,7 @@ See `dape--callback' for expected CB signature."
                       (list
                        :name (file-name-nondirectory
                               (buffer-file-name buffer))
-                       :path (buffer-file-name buffer))))))
+                       :path (dape--path (buffer-file-name buffer) 'remote))))))
     (dape-request process
                   "setBreakpoints"
                   (list
@@ -1503,7 +1579,11 @@ Starts a new process as per request of the debug adapter."
                                     (dape--debug 'std-server
                                                  "Server stdout:\n%s"
                                                  string))
-                          :noquery t))
+                          :noquery t
+                          :file-handler t))
+      ;; FIXME Why do I need this?
+      (when (file-remote-p default-directory)
+        (sleep-for 0 300))
       (dape--debug 'info "Server process started %S"
                    (process-command dape--server-process)))
     (while (and (not process)
@@ -1544,7 +1624,8 @@ Starts a new process as per request of the debug adapter."
                                 :sentinel 'dape--process-sentinel
                                 :filter 'dape--process-filter
                                 :buffer buffer
-                                :noquery t))
+                                :noquery t
+                                :file-handler t))
     (dape--debug 'info "Process started %S" (process-command process))
     (dape--setup process config)))
 
@@ -1569,6 +1650,8 @@ Starts a new process as per request of the debug adapter."
 (defun dape-continue ()
   "Resumes execution."
   (interactive)
+  (unless (dape--stopped-threads)
+    (user-error "No stopped threads"))
   (dape-request (dape--live-process)
                 "continue"
                 (dape--thread-id-object)
@@ -1836,8 +1919,13 @@ Use SKIP-COMPILE to skip compilation."
               (with-current-buffer buffer
                 (let ((inhibit-read-only t))
                   (erase-buffer)))))
-          (when-let ((fn (plist-get config 'fn)))
-            (setq config (funcall fn (copy-tree config))))
+          (when-let ((fn (plist-get config 'fn))
+                     (fns (or (and (functionp fn) (list fn))
+                              (and (listp fn) fn))))
+            (setq config
+                  (seq-reduce (lambda (config fn)
+                                (funcall fn config))
+                              fns (copy-tree config))))
           (when-let ((ensure (plist-get config 'ensure)))
             (funcall ensure (copy-tree config)))
           (cond
@@ -2617,18 +2705,10 @@ FN is executed on mouse-2 and ?r, BODY is executed inside of let stmt."
 
 (dape--info-buffer-command dape-info-breakpoint-goto (dape--info-breakpoint)
   "Goto breakpoint at line in dape info buffer."
-  (when-let* ((buffer (overlay-buffer dape--info-breakpoint))
-              (line
-               (with-current-buffer buffer
-                 (line-number-at-pos (overlay-start dape--info-breakpoint))))
-              (source
-               (with-current-buffer buffer
-                 (or dape--source
-                     (list
-                      :name (file-name-nondirectory
-                             (buffer-file-name buffer))
-                      :path (buffer-file-name buffer))))))
-    (dape--goto-source (list :source source :line line) nil t)))
+  (when-let* ((buffer (overlay-buffer dape--info-breakpoint)))
+    (display-buffer buffer
+                    dape-display-source-buffer-action)
+    (goto-char (overlay-start buffer))))
 
 (dape--info-buffer-command dape-info-breakpoint-delete (dape--info-breakpoint)
   "Delete breakpoint at line in dape info buffer."
@@ -2778,7 +2858,8 @@ CB is expected to be `dape--info-threads-update'."
                 (when-let ((dape-info-thread-buffer-locations)
                            (path (thread-first top-stack
                                                (plist-get :source)
-                                               (plist-get :path)))
+                                               (plist-get :path)
+                                               (dape--path 'local)))
                            (line (plist-get top-stack :line)))
                   (concat " of " (dape--format-file-line path line)))
                 (when-let ((dape-info-thread-buffer-addresses)
@@ -2855,7 +2936,8 @@ Updates from CURRENT-STACK-FRAME STACK-FRAMES."
                 (when-let ((dape-info-stack-buffer-locations)
                            (path (thread-first frame
                                                (plist-get :source)
-                                               (plist-get :path))))
+                                               (plist-get :path)
+                                               (dape--path 'local))))
                   (concat " of "
                           (dape--format-file-line path
                                                   (plist-get frame :line))))
