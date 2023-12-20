@@ -114,7 +114,7 @@
                   (user-error "%s module debugpy is not installed" python))))
      fn (dape-config-autoport dape-config-tramp)
      command "python3"
-     command-args ("-m" "debugpy.adapter" "--port" :autoport)
+     command-args ("-m" "debugpy.adapter" "--host" "0.0.0.0" "--port" :autoport)
      port :autoport
      :request "launch"
      :type "executable"
@@ -316,10 +316,6 @@ Functions and symbols in configuration:
 (defcustom dape-update-ui-hooks '(dape-info-update)
   "Hook to run on ui update."
   :type 'hook)
-
-(defcustom dape-main-functions nil
-  "Functions to set breakpoints at startup if no other breakpoints are set."
-  :type '(repeat string))
 
 (defcustom dape-read-memory-default-count 1024
   "The default count for `dape-read-memory'."
@@ -1026,68 +1022,67 @@ See `dape--callback' for expected function signature."
                                     (plist-put :command command)))))
 
 (defun dape--initialize (process)
-  "Send initialize request to PROCESS."
-  (dape-request process
-                "initialize"
-                (list :clientID "dape"
-                      :adapterID (plist-get dape--config
-                                            :type)
-                      :pathFormat "path"
-                      :linesStartAt1 t
-                      :columnsStartAt1 t
-                      ;;:locale "en-US"
-                      ;;:supportsVariableType t
-                      ;;:supportsVariablePaging t
-                      :supportsRunInTerminalRequest t
-                      ;;:supportsMemoryReferences t
-                      ;;:supportsInvalidatedEvent t
-                      ;;:supportsMemoryEvent t
-                      ;;:supportsArgsCanBeInterpretedByShell t
-                      :supportsProgressReporting t
-                      :supportsStartDebuggingRequest t
-                      ;;:supportsVariableType t
-                      )
-                (dape--callback
-                 (setq dape--capabilities body)
-                 (when success
-                   (dape--launch-or-attach process)))))
+  "Initialize and launch/attach session for PROCESS."
+  (dape--with dape-request (process
+                            "initialize"
+                            (list :clientID "dape"
+                                  :adapterID (plist-get dape--config
+                                                        :type)
+                                  :pathFormat "path"
+                                  :linesStartAt1 t
+                                  :columnsStartAt1 t
+                                  ;;:locale "en-US"
+                                  ;;:supportsVariableType t
+                                  ;;:supportsVariablePaging t
+                                  :supportsRunInTerminalRequest t
+                                  ;;:supportsMemoryReferences t
+                                  ;;:supportsInvalidatedEvent t
+                                  ;;:supportsMemoryEvent t
+                                  ;;:supportsArgsCanBeInterpretedByShell t
+                                  :supportsProgressReporting t
+                                  :supportsStartDebuggingRequest t
+                                  ;;:supportsVariableType t
+                                  ))
+    (if (not success)
+        (dape--repl-message msg 'dape-repl-exit-code-fail)
+      (setq dape--capabilities body)
+      (let ((start-debugging (plist-get dape--config 'start-debugging)))
+        (dape-request process
+                      (or (plist-get dape--config :request) "launch")
+                      (append
+                       (cl-loop for (key value) on dape--config by 'cddr
+                                when (keywordp key)
+                                append (list key value))
+                       start-debugging)
+                      (dape--callback
+                       ;; nil start-debugging only if started as a part of
+                       ;; a start-debugging request
+                       (when start-debugging
+                         (plist-put dape--config 'start-debugging nil))
+                       (unless success
+                         (dape--repl-message msg 'dape-repl-exit-code-fail)
+                         (dape-kill)))
+                      ;; dlv adapter takes some time during launch request
+                      'skip-timeout)))))
 
-(defun dape--launch-or-attach (process)
-  "Send launch or attach request to PROCESS.
-Uses `dape--config' to derive type and to construct request."
-  (let ((start-debugging (plist-get dape--config 'start-debugging)))
-    (dape-request process
-                  (or (plist-get dape--config :request) "launch")
-                  (append
-                   (cl-loop for (key value) on dape--config by 'cddr
-                            when (keywordp key)
-                            append (list key value))
-                   start-debugging)
-                  (dape--callback
-                   ;; nil start-debugging only if started as a part of
-                   ;; a start-debugging request
-                   (when start-debugging
-                     (plist-put dape--config 'start-debugging nil))
-                   (unless success
-                     (dape--repl-message msg 'dape-repl-exit-code-fail)
-                     (dape-kill)))
-                  ;; dlv adapter takes some time during launch request
-                  'skip-timeout)))
-
-(defun dape--set-breakpoints (process buffer breakpoints &optional cb)
-  "Set BREAKPOINTS in BUFFER by send setBreakpoints request to PROCESS.
+(defun dape--set-breakpoints-in-buffer (process buffer &optional cb)
+  "Set breakpoints in BUFFER by send setBreakpoints request to PROCESS.
 BREAKPOINTS is an list of breakpoint overlays.
 See `dape--callback' for expected CB signature."
-  (let ((lines (mapcar (lambda (breakpoint)
-                         (with-current-buffer (overlay-buffer breakpoint)
-                           (line-number-at-pos (overlay-start breakpoint))))
-                       breakpoints))
-        (source (with-current-buffer buffer
-                  (or dape--source
-                      (list
-                       :name (file-name-nondirectory
-                              (buffer-file-name buffer))
-                       :path (dape--path (buffer-file-name buffer) 'remote))))))
+  (let* ((breakpoints (and (buffer-live-p buffer)
+                           (alist-get buffer
+                                      (seq-group-by 'overlay-buffer
+                                                    dape--breakpoints))))
+         (lines (mapcar (lambda (breakpoint)
+                          (with-current-buffer (overlay-buffer breakpoint)
+                            (line-number-at-pos (overlay-start breakpoint))))
+                        breakpoints))
+         (source (with-current-buffer buffer
+                   (or dape--source
+                       (list
+                        :name (file-name-nondirectory
+                               (buffer-file-name buffer))
+                        :path (dape--path (buffer-file-name buffer) 'remote))))))
     (dape-request process
                   "setBreakpoints"
                   (list
@@ -1108,22 +1103,6 @@ See `dape--callback' for expected CB signature."
                     lines)
                    :lines (apply 'vector lines))
                   cb)))
-
-(defun dape--set-main-breakpoints (process cb)
-  "Set the main function breakpoints in adapter PROCESS.
-The function names are derived from `dape-main-functions'.
-See `dape--callback' for expected CB signature."
-  (if (plist-get dape--capabilities :supportsFunctionBreakpoints)
-      (dape-request process
-                    "setFunctionBreakpoints"
-                    (list
-                     :breakpoints
-                     (cl-map 'vector
-                             (lambda (name)
-                               (list :name name))
-                             dape-main-functions))
-                    cb)
-    (funcall cb process)))
 
 (defun dape--set-exception-breakpoints (process cb)
   "Set the exception breakpoints in adapter PROCESS.
@@ -1170,30 +1149,20 @@ See `dape--callback' for expected CB signature."
                                     (run-hooks 'dape-update-ui-hooks)
                                     (funcall cb process))))
 
-(defun dape--configure-breakpoints (process cb)
-  "Configure breakpoints in adapter PROCESS.
+(defun dape--set-breakpoints (process cb)
+  "Set breakpoints in adapter PROCESS.
 See `dape--callback' for expected CB signature."
-  (dape--clean-breakpoints)
-  (if-let ((counter 0)
-           (buffers-breakpoints (seq-group-by 'overlay-buffer
-                                              dape--breakpoints)))
-      (dolist (buffer-breakpoints buffers-breakpoints)
-        (pcase-let ((`(,buffer . ,breakpoints) buffer-breakpoints))
-          (dape--set-breakpoints process
-                                 buffer
-                                 breakpoints
-                                 (dape--callback
-                                  (setf counter (1+ counter))
-                                  (when (eq counter (length buffers-breakpoints))
-                                    (funcall cb process nil))))))
-    (dape--set-main-breakpoints process cb)))
-
-(defun dape--configuration-done (process)
-  "End initialization of adapter PROCESS."
-  (dape-request process
-                "configurationDone"
-                nil
-                (dape--callback nil)))
+  (if-let ((buffers
+            (thread-last dape--breakpoints
+                         (seq-group-by 'overlay-buffer)
+                         (mapcar 'car)))
+           (responses 0))
+      (dolist (buffer buffers)
+        (dape--with dape--set-breakpoints-in-buffer (process buffer)
+          (setq responses (1+ responses))
+          (when (eq responses (length buffers))
+            (funcall cb process nil))))
+    (funcall cb process nil)))
 
 (defun dape--get-threads (process stopped-id all-threads-stopped cb)
   "Helper for the stopped event to update `dape--threads'."
@@ -1430,8 +1399,8 @@ Starts a new process as per request of the debug adapter."
   "Handle initialized events."
   (dape--update-state "initialized")
   (dape--with dape--configure-exceptions (process)
-    (dape--with dape--configure-breakpoints (process)
-      (dape--configuration-done process))))
+    (dape--with dape--set-breakpoints (process)
+      (dape-request process "configurationDone" nil))))
 
 (cl-defmethod dape-handle-event (process (_event (eql capabilities)) body)
   "Handle capabilities events."
@@ -1557,76 +1526,74 @@ Starts a new process as per request of the debug adapter."
         (erase-buffer)))
     buffer))
 
-(defun dape--start-multi-session (config)
-  "Start multi session for CONFIG."
-  (dape--debug 'info "Starting new multi session with config:\n%S" config)
+(defun dape--create-connection (config)
+  (dape--debug 'info "Starting new session with config:\n%S" config)
   (let ((buffer (dape--get-buffer))
         (default-directory (or (plist-get config 'command-cwd)
                                default-directory))
-        (host (or (plist-get config 'host) "localhost"))
         (retries 30)
         process)
-    (when (and (plist-get config 'command)
-               (not (plist-get config 'start-debugging)))
-      (setq dape--server-process
-            (make-process :name "Dape adapter"
-                          :command (cons (plist-get config 'command)
-                                         (cl-map 'list 'identity
-                                                 (plist-get config 'command-args)))
-                          :buffer buffer
-                          :sentinel 'dape--process-sentinel
-                          :filter (lambda (_process string)
-                                    (dape--debug 'std-server
-                                                 "Server stdout:\n%s"
-                                                 string))
-                          :noquery t
-                          :file-handler t))
-      ;; FIXME Why do I need this?
-      (when (file-remote-p default-directory)
-        (sleep-for 0 300))
-      (dape--debug 'info "Server process started %S"
-                   (process-command dape--server-process)))
-    (while (and (not process)
-                (> retries 0))
-      (ignore-errors
-        (setq process
-              (make-network-process :name "Dape adapter connection"
-                                    :buffer buffer
-                                    :host host
-                                    :coding 'utf-8-emacs-unix
-                                    :service (plist-get config 'port)
-                                    :sentinel 'dape--process-sentinel
-                                    :filter 'dape--process-filter
-                                    :noquery t)))
-      (sleep-for 0 100)
-      (setq retries (1- retries)))
-    (if (zerop retries)
-        (user-error "Unable to connect to server %s:%d"
-                    host
-                    (plist-get config 'port))
-      (dape--debug 'info "Connection to server established %s:%s"
-                   host (plist-get config 'port)))
-    (dape--setup process config)))
-
-(defun dape--start-single-session (config)
-  "Start single session for CONFIG."
-  (dape--debug 'info "Starting new single session with config:\n%S" config)
-  (let ((buffer (dape--get-buffer))
-        (default-directory (or (plist-get config 'command-cwd)
-                               default-directory))
-        process)
-    (setq process (make-process :name "Dape adapter"
-                                :command (cons (plist-get config 'command)
-                                               (cl-map 'list 'identity
-                                                       (plist-get config 'command-args)))
-                                :connection-type 'pipe
-                                :coding 'utf-8-emacs-unix
-                                :sentinel 'dape--process-sentinel
-                                :filter 'dape--process-filter
-                                :buffer buffer
-                                :noquery t
-                                :file-handler t))
-    (dape--debug 'info "Process started %S" (process-command process))
+    (cond
+     ;; socket connection
+     ((plist-get config 'port)
+      ;; start server
+      (when (and (plist-get config 'command)
+                 (not (plist-get config 'start-debugging)))
+        (setq dape--server-process
+              (make-process :name "Dape adapter"
+                            :command (cons (plist-get config 'command)
+                                           (cl-map 'list 'identity
+                                                   (plist-get config 'command-args)))
+                            :buffer buffer
+                            :sentinel 'dape--process-sentinel
+                            :filter (lambda (_process string)
+                                      (dape--debug 'std-server
+                                                   "Server stdout:\n%s"
+                                                   string))
+                            :noquery t
+                            :file-handler t))
+        (dape--debug 'info "Server process started %S"
+                     (process-command dape--server-process))
+        ;; FIXME Why do I need this?
+        (when (file-remote-p default-directory)
+          (sleep-for 0 300)))
+      ;; connect to server
+      (let ((host (or (plist-get config 'host) "localhost")))
+        (while (and (not process)
+                    (> retries 0))
+          (ignore-errors
+            (setq process
+                  (make-network-process :name "Dape adapter connection"
+                                        :buffer buffer
+                                        :host host
+                                        :coding 'utf-8-emacs-unix
+                                        :service (plist-get config 'port)
+                                        :sentinel 'dape--process-sentinel
+                                        :filter 'dape--process-filter
+                                        :noquery t)))
+          (sleep-for 0 100)
+          (setq retries (1- retries)))
+        (if (zerop retries)
+            (progn (dape-kill)
+                   (user-error "Unable to connect to server %s:%d"
+                               host
+                               (plist-get config 'port)))
+          (dape--debug 'info "Connection to server established %s:%s"
+                       host (plist-get config 'port)))))
+     ;; stdio connection
+     (t
+      (setq process (make-process :name "Dape adapter"
+                                  :command (cons (plist-get config 'command)
+                                                 (cl-map 'list 'identity
+                                                         (plist-get config 'command-args)))
+                                  :connection-type 'pipe
+                                  :coding 'utf-8-emacs-unix
+                                  :sentinel 'dape--process-sentinel
+                                  :filter 'dape--process-filter
+                                  :buffer buffer
+                                  :noquery t
+                                  :file-handler t))
+      (dape--debug 'info "Process started %S" (process-command process))))
     (dape--setup process config)))
 
 
@@ -1756,8 +1723,8 @@ Will remove log or expression breakpoint at line added with
 `dape-breakpoint-log' and/or `dape-breakpoint-expression'."
   (interactive)
   (if (dape--breakpoints-at-point '(dape-log-message dape-expr-message))
-      (dape-remove-breakpoint-at-point '(dape-log-message dape-expr-message))
-    (dape--place-breakpoint)))
+      (dape-breakpoint-remove-at-point '(dape-log-message dape-expr-message))
+    (dape--breakpoint-place)))
 
 (defun dape-breakpoint-log (log-message)
   "Add log breakpoint at line.
@@ -1774,9 +1741,9 @@ Expressions within `{}` are interpolated."
   (when-let ((prev-log-breakpoint (seq-find (lambda (ov)
                                               (overlay-get ov 'dape-log-message))
                                             (dape--breakpoints-at-point))))
-    (dape--remove-breakpoint prev-log-breakpoint t))
+    (dape--breakpoint-remove prev-log-breakpoint t))
   (unless (string-empty-p log-message)
-    (dape--place-breakpoint log-message)))
+    (dape--breakpoint-place log-message)))
 
 (defun dape-breakpoint-expression (expr-message)
   "Add expression breakpoint at current line.
@@ -1793,16 +1760,16 @@ When EXPR-MESSAGE is evaluated as true threads will pause at current line."
               (seq-find (lambda (ov)
                           (overlay-get ov 'dape-expr-message))
                         (dape--breakpoints-at-point))))
-    (dape--remove-breakpoint prev-expr-breakpoint t))
+    (dape--breakpoint-remove prev-expr-breakpoint t))
   (unless (string-empty-p expr-message)
-    (dape--place-breakpoint nil expr-message)))
+    (dape--breakpoint-place nil expr-message)))
 
-(defun dape-remove-breakpoint-at-point (&optional skip-types)
+(defun dape-breakpoint-remove-at-point (&optional skip-types)
   "Remove breakpoint, log breakpoint and expression at current line.
 SKIP-TYPES is a list of overlay properties to skip removal of."
   (interactive)
   (dolist (breakpoint (dape--breakpoints-at-point skip-types))
-    (dape--remove-breakpoint breakpoint)))
+    (dape--breakpoint-remove breakpoint)))
 
 (defun dape-breakpoint-remove-all ()
   "Remove all breakpoints."
@@ -1812,8 +1779,9 @@ SKIP-TYPES is a list of overlay properties to skip removal of."
     (dolist (buffer-breakpoints buffers-breakpoints)
       (pcase-let ((`(,buffer . ,breakpoints) buffer-breakpoints))
         (dolist (breakpoint breakpoints)
-          (dape--remove-breakpoint breakpoint t))
-        (dape--update-breakpoints-in-buffer buffer)))))
+          (dape--breakpoint-remove breakpoint t))
+        (when-let ((process (dape--live-process t)))
+          (dape--set-breakpoints-in-buffer process buffer))))))
 
 (defun dape-select-thread (thread-id)
   "Selecte currrent thread by THREAD-ID."
@@ -1928,13 +1896,9 @@ Use SKIP-COMPILE to skip compilation."
                               fns (copy-tree config))))
           (when-let ((ensure (plist-get config 'ensure)))
             (funcall ensure (copy-tree config)))
-          (cond
-           ((and (not skip-compile) (plist-get config 'compile))
-            (dape--compile config))
-           ((plist-get config 'port)
-            (dape--start-multi-session config))
-           (t
-            (dape--start-single-session config))))))
+          (if (and (not skip-compile) (plist-get config 'compile))
+              (dape--compile config)
+            (dape--create-connection config)))))
     (if (plist-get config 'start-debugging)
         (funcall fn)
       (dape-kill fn))))
@@ -2083,17 +2047,19 @@ If SKIP-TYPES overlays with properties in SKIP-TYPES are filtered."
                                    skip-types))))
               (overlays-in (line-beginning-position) (line-end-position))))
 
-(defun dape--update-breakpoints-in-buffer (buffer)
-  "Update all breakpoints in BUFFER."
-  (when (buffer-live-p buffer)
-    (when-let ((process (dape--live-process t)))
-      (dape--set-breakpoints process
-                             buffer
-                             (thread-last dape--breakpoints
-                                          (seq-group-by 'overlay-buffer)
-                                          (alist-get buffer))))))
+(defun dape--breakpoint-buffer-kill-hook (&rest _)
+  "Hook to remove breakpoint on buffer killed."
+  (let ((breakpoints
+         (alist-get (current-buffer)
+                    (seq-group-by 'overlay-buffer
+                                  dape--breakpoints))))
+    (dolist (breakpoint breakpoints)
+      (setq dape--breakpoints (delq breakpoint dape--breakpoints)))
+  (when-let ((process (dape--live-process t)))
+    (dape--set-breakpoints-in-buffer process (current-buffer))))
+  (run-hooks 'dape-update-ui-hooks))
 
-(defun dape--place-breakpoint (&optional log-message expression)
+(defun dape--breakpoint-place (&optional log-message expression)
   "Place breakpoint at current line.
 If LOG-MESSAGE place log breakpoint.
 If EXPRESSION place conditional breakpoint."
@@ -2124,23 +2090,21 @@ If EXPRESSION place conditional breakpoint."
                           'dape-breakpoint-face)))
     (overlay-put breakpoint 'modification-hooks '(dape--breakpoint-freeze))
     (push breakpoint dape--breakpoints))
-  (dape--update-breakpoints-in-buffer (current-buffer))
+  (when-let ((process (dape--live-process t)))
+    (dape--set-breakpoints-in-buffer process (current-buffer)))
+  (add-hook 'kill-buffer-hook 'dape--breakpoint-buffer-kill-hook nil t)
   (run-hooks 'dape-update-ui-hooks))
 
-(defun dape--remove-breakpoint (overlay &optional skip-update)
+(defun dape--breakpoint-remove (overlay &optional skip-update)
   "Remove OVERLAY breakpoint from buffer and session.
 When SKIP-UPDATE is non nil, does not notify adapter about removal."
   (setq dape--breakpoints (delq overlay dape--breakpoints))
-  (unless skip-update
-    (dape--update-breakpoints-in-buffer (overlay-buffer overlay)))
+  (when-let (((not skip-update))
+             (process (dape--live-process t)))
+    (dape--set-breakpoints-in-buffer process (overlay-buffer overlay)))
   (dape--margin-cleanup (overlay-buffer overlay))
-  (delete-overlay overlay)
-  (run-hooks 'dape-update-ui-hooks))
-
-(defun dape--clean-breakpoints ()
-  "Clean breakpoint list of all overlays that does not have a buffer."
-  (setq dape--breakpoints (seq-filter 'overlay-buffer
-                                      dape--breakpoints)))
+  (run-hooks 'dape-update-ui-hooks)
+  (delete-overlay overlay))
 
 
 ;;; Source buffers
@@ -2712,7 +2676,7 @@ FN is executed on mouse-2 and ?r, BODY is executed inside of let stmt."
 
 (dape--info-buffer-command dape-info-breakpoint-delete (dape--info-breakpoint)
   "Delete breakpoint at line in dape info buffer."
-  (dape--remove-breakpoint dape--info-breakpoint)
+  (dape--breakpoint-remove dape--info-breakpoint)
   (dape--display-buffer (dape--info-buffer 'dape-info-breakpoints-mode)))
 
 (dape--info-buffer-map dape-info-breakpoints-line-map dape-info-breakpoint-goto
