@@ -113,7 +113,7 @@
                           (format "%s -c \"import debugpy.adapter\"" python)))
                   (user-error "%s module debugpy is not installed" python))))
      fn (dape-config-autoport dape-config-tramp)
-     command "python3"
+     command "python"
      command-args ("-m" "debugpy.adapter" "--host" "0.0.0.0" "--port" :autoport)
      port :autoport
      :request "launch"
@@ -121,6 +121,7 @@
      :cwd dape-cwd-fn
      :program dape-find-file-buffer-default
      :justMyCode nil
+     :console "integratedTerminal"
      :showReturnValue t)
     (dlv
      modes (go-mode go-ts-mode)
@@ -510,25 +511,24 @@ The hook is run with one argument, the compilation buffer."
   (declare (indent 2))
   `(,request-fn ,@args (dape--callback ,@body)))
 
-(defun dape--next-like-command (command &optional arg)
+(defun dape--next-like-command (command)
   "Helper for interactive step like commands.
 Run step like COMMAND.  If ARG is set run COMMAND ARG times."
   (if (dape--stopped-threads)
-      (dotimes (_ (or arg 1))
-        (dape-request (dape--live-process)
-                      command
-                      `(,@(dape--thread-id-object)
-                        ,@(when (plist-get dape--capabilities
-                                           :supportsSteppingGranularity)
-                            (list :granularity
-                                  (symbol-name dape-stepping-granularity))))
-                      (dape--callback
-                       (when success
-                         (dape--update-state "running")
-                         (dape--remove-stack-pointers)
-                         (dolist (thread dape--threads)
-                           (plist-put thread :status "running"))
-                         (run-hooks 'dape-update-ui-hooks)))))
+      (dape-request (dape--live-process)
+                    command
+                    `(,@(dape--thread-id-object)
+                      ,@(when (plist-get dape--capabilities
+                                         :supportsSteppingGranularity)
+                          (list :granularity
+                                (symbol-name dape-stepping-granularity))))
+                    (dape--callback
+                     (when success
+                       (dape--update-state "running")
+                       (dape--remove-stack-pointers)
+                       (dolist (thread dape--threads)
+                         (plist-put thread :status "running"))
+                       (run-hooks 'dape-update-ui-hooks))))
     (user-error "No stopped threads")))
 
 (defun dape--thread-id-object ()
@@ -1353,17 +1353,21 @@ Adapter is identified with PROCESS."
                command
                arguments))
 
-(cl-defmethod dape-handle-request (process (_command (eql runInTerminal)) _seq arguments)
+(cl-defmethod dape-handle-request (_process (_command (eql runInTerminal)) _seq arguments)
   "Handle runInTerminal requests.
 Starts a new process to run process to be debugged."
-  (let* ((cwd (plist-get process :cwd))
-         (default-directory (or (and cwd
-                                     (not (string-blank-p cwd))
-                                     cwd)
-                                default-directory))
-         (buffer (get-buffer-create "*dape-shell*"))
-         (display-buffer-alist
-          '(((major-mode . shell-mode) . (display-buffer-no-window)))))
+  (let ((default-directory (or (plist-get arguments :cwd)
+                               default-directory))
+        (process-environment
+         (or (cl-loop for (key value) on (plist-get arguments :env) by 'cddr
+                      collect
+                      (format "%s=%s"
+                              (substring (format "%s" key) 1)
+                              value))
+             process-environment))
+        (buffer (get-buffer-create "*dape-shell*"))
+        (display-buffer-alist
+         '(((major-mode . shell-mode) . (display-buffer-no-window)))))
     (async-shell-command (string-join
                           (cl-map 'list
                                   'identity
@@ -1371,9 +1375,12 @@ Starts a new process to run process to be debugged."
                           " ")
                          buffer
                          buffer)
-    (dape--display-buffer buffer))
-  ;; For debugpy crashes if we send an response...
-  )
+    (dape--display-buffer buffer)
+    ;; For debugpy crashes if we send an response... it expects seq
+    ;; in response which makes no sense
+    ;; (dape--response process (symbol-name command) seq t
+    ;;                 `(:processID ,pid))
+    ))
 
 (cl-defmethod dape-handle-request (process (command (eql startDebugging)) seq arguments)
   "Handle startDebugging requests.
@@ -1384,9 +1391,9 @@ Starts a new process as per request of the debug adapter."
   (when (hash-table-p dape--timers)
     (dolist (timer (hash-table-values dape--timers))
       (cancel-timer timer)))
-  (dape (plist-put dape--config
-                   'start-debugging
-                   (plist-get arguments :configuration))))
+  (dape--create-connection (plist-put dape--config
+                                      'start-debugging
+                                      (plist-get arguments :configuration))))
 
 
 ;;; Events
@@ -1599,20 +1606,20 @@ Starts a new process as per request of the debug adapter."
 
 ;;; Commands
 
-(defun dape-next (&optional arg)
+(defun dape-next ()
   "Step one line (skip functions)."
-  (interactive (list current-prefix-arg))
-  (dape--next-like-command "next" arg))
+  (interactive)
+  (dape--next-like-command "next"))
 
-(defun dape-step-in (&optional arg)
+(defun dape-step-in ()
   "Steps into function/method. If not possible behaves like `dape-next'."
-  (interactive (list current-prefix-arg))
-  (dape--next-like-command "stepIn" arg))
+  (interactive)
+  (dape--next-like-command "stepIn"))
 
-(defun dape-step-out (&optional arg)
+(defun dape-step-out ()
   "Steps out of function/method. If not possible behaves like `dape-next'."
-  (interactive (list current-prefix-arg))
-  (dape--next-like-command "stepOut" arg))
+  (interactive)
+  (dape--next-like-command "stepOut"))
 
 (defun dape-continue ()
   "Resumes execution."
@@ -1849,7 +1856,9 @@ Watched symbols are displayed in *dape-info* buffer.
   (run-hooks 'dape-update-ui-hooks))
 
 (defun dape-evaluate-expression (expression)
-  "Evaluate EXPRESSION."
+  "Evaluate EXPRESSION.
+EXPRESSION can be an expression or adapter command, as it's evaluated in
+repl context."
   (interactive
    (list (string-trim
           (read-string "Evaluate: "
@@ -1860,8 +1869,8 @@ Watched symbols are displayed in *dape-info* buffer.
   (dape--with dape--evaluate-expression ((dape--live-process)
                                          (plist-get (dape--current-stack-frame) :id)
                                          (substring-no-properties expression)
-                                         "hover")
-      (message "%S" body)))
+                                         "repl")
+      (message "%s" (plist-get body :result))))
 
 ;;;###autoload
 (defun dape (config &optional skip-compile)
@@ -1880,28 +1889,19 @@ Executes alist key `launch' in `dape-configs' with :program as \"bin\".
 
 Use SKIP-COMPILE to skip compilation."
   (interactive (list (dape--read-config)))
-  (let ((fn
-         (dape--callback
-          (unless (plist-get config 'start-debugging)
-            (when-let ((buffer (get-buffer "*dape-debug*")))
-              (with-current-buffer buffer
-                (let ((inhibit-read-only t))
-                  (erase-buffer)))))
-          (when-let ((fn (plist-get config 'fn))
-                     (fns (or (and (functionp fn) (list fn))
-                              (and (listp fn) fn))))
-            (setq config
-                  (seq-reduce (lambda (config fn)
-                                (funcall fn config))
-                              fns (copy-tree config))))
-          (when-let ((ensure (plist-get config 'ensure)))
-            (funcall ensure (copy-tree config)))
-          (if (and (not skip-compile) (plist-get config 'compile))
-              (dape--compile config)
-            (dape--create-connection config)))))
-    (if (plist-get config 'start-debugging)
-        (funcall fn)
-      (dape-kill fn))))
+  (dape--with dape-kill ()
+    (when-let ((fn (plist-get config 'fn))
+               (fns (or (and (functionp fn) (list fn))
+                        (and (listp fn) fn))))
+      (setq config
+            (seq-reduce (lambda (config fn)
+                          (funcall fn config))
+                        fns (copy-tree config))))
+    (when-let ((ensure (plist-get config 'ensure)))
+      (funcall ensure (copy-tree config)))
+    (if (and (not skip-compile) (plist-get config 'compile))
+        (dape--compile config)
+      (dape--create-connection config))))
 
 
 ;;; Compile
@@ -2164,17 +2164,14 @@ See `dape--callback' for expected CB signature."
   (dape--remove-stack-pointers)
   (when-let ((frame (dape--current-stack-frame)))
     (dape--with dape--source-ensure ((dape--live-process t) frame)
+      (dape--goto-source frame (memq major-mode '(dape-repl-mode)) t)
       (when-let ((marker (dape--object-to-marker frame)))
         (with-current-buffer (marker-buffer marker)
           (dape--add-eldoc-hook)
           (save-excursion
             (goto-char (marker-position marker))
             (set-marker dape--stack-position
-                        (line-beginning-position))))
-        (dape--goto-source frame
-                           (memq major-mode
-                                 '(dape-repl-mode))
-                           t)))))
+                        (line-beginning-position))))))))
 
 (add-to-list 'overlay-arrow-variable-list 'dape--stack-position)
 
@@ -2670,9 +2667,9 @@ FN is executed on mouse-2 and ?r, BODY is executed inside of let stmt."
 (dape--info-buffer-command dape-info-breakpoint-goto (dape--info-breakpoint)
   "Goto breakpoint at line in dape info buffer."
   (when-let* ((buffer (overlay-buffer dape--info-breakpoint)))
-    (display-buffer buffer
-                    dape-display-source-buffer-action)
-    (goto-char (overlay-start buffer))))
+    (select-window
+     (display-buffer buffer dape-display-source-buffer-action))
+    (goto-char (overlay-start dape--info-breakpoint))))
 
 (dape--info-buffer-command dape-info-breakpoint-delete (dape--info-breakpoint)
   "Delete breakpoint at line in dape info buffer."
@@ -3365,7 +3362,6 @@ See `dape--config-mode-p' how \"valid\" is defined."
                                               (let ((map (make-sparse-keymap)))
                                                 (set-keymap-parent map minibuffer-local-map)
                                                 (define-key map "C-M-i" #'completion-at-point)
-                                                (define-key map "TAB" #'completion-at-point)
                                                 (define-key map "\t" #'completion-at-point)
                                                 map)
                                               nil 'dape-history initial-contents))
