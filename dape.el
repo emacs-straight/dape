@@ -77,7 +77,7 @@
                fn dape-config-autoport
                :type "lldb"
                :request "launch"
-               :cwd dape-cwd-fn
+               :cwd dape-cwd
                :program dape-find-file
                :args [])))
         `((codelldb-cc
@@ -100,7 +100,7 @@
                                 "OpenDebugAD7")
      :type "cppdbg"
      :request "launch"
-     :cwd dape-cwd-fn
+     :cwd dape-cwd
      :program dape-find-file
      :MIMode ,(seq-find 'executable-find '("lldb" "gdb")))
     (debugpy
@@ -119,7 +119,7 @@
      port :autoport
      :request "launch"
      :type "executable"
-     :cwd dape-cwd-fn
+     :cwd dape-cwd
      :program dape-find-file-buffer-default
      :justMyCode nil
      :console "integratedTerminal"
@@ -130,20 +130,20 @@
      fn (dape-config-autoport dape-config-tramp)
      command "dlv"
      command-args ("dap" "--listen" "127.0.0.1::autoport")
-     command-cwd dape-cwd-fn
+     command-cwd dape-command-cwd
      port :autoport
      :request "launch"
      :type "debug"
-     :cwd dape-cwd-fn
-     :program dape-cwd-fn)
+     :cwd dape-cwd
+     :program dape-cwd)
     (flutter
      ensure dape-ensure-command
      modes (dart-mode)
      command "flutter"
      command-args ("debug_adapter")
-     command-cwd dape-cwd-fn
+     command-cwd dape-command-cwd
      :type "dart"
-     :cwd dape-cwd-fn
+     :cwd dape-cwd
      :program dape-find-file-buffer-default
      :toolArgs ,(lambda () (vector "-d" (read-string "Device id: "))))
     (godot
@@ -151,7 +151,7 @@
      port 6006
      :request "launch"
      :type "server"
-     :cwd dape-cwd-fn)
+     :cwd dape-cwd)
     ,@(let ((js-debug
              `(modes (js-mode js-ts-mode)
                ensure ,(lambda (config)
@@ -172,7 +172,7 @@
         `((js-debug-node
            ,@js-debug
            :type "pwa-node"
-           :cwd dape-cwd-fn
+           :cwd dape-cwd
            :program dape-find-file-buffer-default
            :outputCapture "console"
            :sourceMapRenames t
@@ -187,14 +187,14 @@
            :url ,(lambda ()
                    (read-string "Url: "
                                 "http://localhost:3000"))
-           :webRoot dape-cwd-fn
+           :webRoot dape-cwd
            :outputCapture "console")))
     (lldb-vscode
      modes (c-mode c-ts-mode c++-mode c++-ts-mode rust-mode rust-ts-mode)
      ensure dape-ensure-command
      command "lldb-vscode"
      :type "lldb-vscode"
-     :cwd dape-cwd-fn
+     :cwd dape-cwd
      :program dape-find-file)
     (netcoredbg
      modes (csharp-mode csharp-ts-mode)
@@ -202,7 +202,7 @@
      command "netcoredbg"
      command-args ["--interpreter=vscode"]
      :request "launch"
-     :cwd dape-cwd-fn
+     :cwd dape-cwd
      :program dape-find-file
      :stopAtEntry nil)
     (rdbg
@@ -210,7 +210,7 @@
      ensure dape-ensure-command
      command "rdbg"
      command-args ("-O" "--host" "0.0.0.0" "--port" :autoport "-c" "--" :-c)
-     command-cwd (lambda () (funcall dape-cwd-fn t))
+     command-cwd dape-command-cwd
      fn ((lambda (config)
            (plist-put config 'command-args
                       (mapcar (lambda (arg)
@@ -226,7 +226,62 @@
      ;; rails server
      ;; bundle exec ruby foo.rb
      ;; bundle exec rake test
-     -c (lambda () (read-string "Invoke command: "))))
+     -c (lambda () (read-string "Invoke command: ")))
+    (jdtls
+     modes (java-mode java-ts-mode)
+     ensure (lambda (config)
+	      (require 'eglot)
+	      (let* ((target (plist-get config 'target))
+		     (target-file (cond ((functionp target) (funcall target))
+					((stringp target) target))))
+		(unless target-file
+		  (error "No debug target specified"))
+		(with-current-buffer (find-file target-file)
+		  (unless (eglot-current-server)
+		    (eglot-ensure)
+		    (error "No running eglot server, starting one. Try again when eglot server is running"))
+		  (unless (seq-contains-p (eglot--server-capable :executeCommandProvider :commands)
+					  "vscode.java.resolveClasspath")
+		    (error "jdtls instance does not bundle java-debug-server, please install")))))
+     fn (lambda (config)
+	  (pcase-let* ((target (plist-get config 'target))
+		       (default-directory (project-root (project-current)))
+		       (server (with-current-buffer (find-file target)
+				 (eglot-current-server)))
+		       (`(,project-name ,main-class)
+			(split-string (plist-get config 'entrypoint) ":"))
+		       (`[,module-paths ,class-paths]
+			(eglot-execute-command server "vscode.java.resolveClasspath"
+					       (vector main-class project-name))))
+	    (thread-first config
+			  (plist-put :mainClass main-class)
+			  (plist-put :projectName project-name)
+			  (plist-put :modulePaths module-paths)
+			  (plist-put :classPaths class-paths))))
+     port (lambda () (eglot-execute-command (eglot-current-server)
+					    "vscode.java.startDebugSession" nil))
+     entrypoint (lambda ()
+		  (completing-read
+		   "Main class: "
+		   (cl-map 'list
+			   (lambda (candidate)
+			     (concat (plist-get candidate :projectName) ":"
+				     (plist-get candidate :mainClass)))
+			   (eglot-execute-command (eglot-current-server)
+						  "vscode.java.resolveMainClass"
+						  (project-name (project-current))))
+		   nil t))
+     target (lambda () (when (buffer-file-name)
+			 (file-relative-name (buffer-file-name)
+					     (project-root (project-current)))))
+     :args ""
+     :stopOnEntry nil
+     :type "java"
+     :request "launch"
+     :vmArgs " -XX:+ShowCodeDetailsInExceptionMessages"
+     :console "integratedConsole"
+     :internalConsoleOptions "neverOpen"))
+
   "This variable holds the Dape configurations as an alist.
 In this alist, the car element serves as a symbol identifying each
 configuration.  Each configuration, in turn, is a property list (plist)
@@ -312,15 +367,15 @@ Example value:
   "`display-buffer' action used when displaying source buffer."
   :type 'sexp)
 
+(define-obsolete-variable-alias
+  'dape-buffer-window-arrangment
+  'dape-buffer-window-arrangement "0.3.0")
+
 (defcustom dape-buffer-window-arrangement 'left
   "Rules for display dape buffers."
   :type '(choice (const :tag "GUD gdb like" gud)
                  (const :tag "Left side" left)
                  (const :tag "Right side" right)))
-
-(define-obsolete-variable-alias
-  'dape-buffer-window-arrangment
-  'dape-buffer-window-arrangement "0.3.0")
 
 (defcustom dape-stepping-granularity 'line
   "The granularity of one step in the stepping requests."
@@ -655,21 +710,28 @@ If PULSE pulse on after opening file."
                                               (line-beginning-position 2)
                                               'next-error)))))))
 
-(defun dape--default-cwd (&optional skip-tramp-trim)
-  "Try to guess current project absolute file path.
-On SKIP-TRAMP-TRIM tramp prefix is keept in path."
-  (let ((root (or (when-let ((project (project-current)))
-                    (expand-file-name (project-root project)))
-                  default-directory)))
-    (if (and (not skip-tramp-trim) (tramp-tramp-file-p root))
+(defun dape--default-cwd ()
+  "Try to guess current project absolute file path with `project'."
+  (or (when-let ((project (project-current)))
+        (expand-file-name (project-root project)))
+      default-directory))
+
+(defun dape-cwd ()
+  "Use `dape-cwd-fn' to guess current working as local path."
+  (let ((root (funcall dape-cwd-fn)))
+    (if (tramp-tramp-file-p root)
         (tramp-file-name-localname (tramp-dissect-file-name root))
       root)))
+
+(defun dape-command-cwd ()
+  "Use `dape-cwd-fn' to guess current working directory."
+  (funcall dape-cwd-fn))
 
 (defun dape-find-file (&optional default)
   "Read filename without any ignored extensions at project root.
 DEFAULT specifies which file to return on empty input."
   (let* ((completion-ignored-extensions nil)
-         (default-directory (funcall dape-cwd-fn t))
+         (default-directory (funcall dape-cwd-fn))
          (file
           (expand-file-name
            (read-file-name (if default
@@ -753,7 +815,8 @@ Replaces symbol and string occurences of \"autoport\"."
          (dape--config-eval-value (plist-get config 'command))))
     (unless (or (file-executable-p command)
                 (executable-find command t))
-      (user-error "Unable to locate %S" command))))
+      (user-error "Unable to locate %s with default-directory %s"
+                  command default-directory))))
 
 (defun dape--overlay-region (&optional extended)
   "List of beg and end of current line.
@@ -1628,11 +1691,17 @@ Starts a new process as per request of the debug adapter."
                             :buffer buffer
                             :sentinel 'dape--process-sentinel
                             :filter (lambda (_process string)
-                                      (dape--debug 'std-server
-                                                   "Server stdout:\n%s"
-                                                   string))
+                                      (dape--repl-message string))
                             :noquery t
-                            :file-handler t))
+                            :file-handler t
+                            :stderr
+                            (make-pipe-process
+                             :name "Dape adapter stderr"
+                             :filter (lambda (_process string)
+                                       (dape--debug 'std-server
+                                                    "Server stdout:\n%s"
+                                                    string))
+                             :buffer buffer)))
         (dape--debug 'info "Server process started %S"
                      (process-command dape--server-process))
         ;; FIXME Why do I need this?
@@ -3458,12 +3527,14 @@ arrays [%S ...], if meant as an object replace (%S ...) with (:%s ...)"
   "Ensure that CONFIG is valid executable.
 If SIGNAL is non nil raises an `user-error'."
   (if-let ((ensure-fn (plist-get config 'ensure)))
-      (let ((default-directory (or (plist-get config 'command-cwd)
-                                   default-directory)))
+      (let ((default-directory
+             (or (when-let ((command-cwd (plist-get config 'command-cwd)))
+                   (dape--config-eval-value command-cwd))
+                 default-directory)))
         (condition-case err
             (or (funcall ensure-fn config) t)
           (user-error
-           (if signal (user-error (cdr err)) nil))))
+           (if signal (user-error (cadr err)) nil))))
     t))
 
 (defun dape--config-mode-p (config)
