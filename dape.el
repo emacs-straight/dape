@@ -359,14 +359,14 @@
                          ((const :tag "Adapter type" :type) string)
                          ((const :tag "Request type launch/attach" :request) string)))))
 
-(defcustom dape-commands nil
-  "Default commands for `dape' completion.
+(defcustom dape-command nil
+  "Initial contents for `dape' completion.
 Sometimes it is useful for files or directories to supply local values
 for this variable.
 
 Example value:
-\((codelldb-cc :program \"/home/user/project/a.out\"))"
-  :type '(repeat sexp))
+\(codelldb-cc :program \"/home/user/project/a.out\")"
+  :type 'sexp)
 
 ;; TODO Add more defaults, don't know which adapters support
 ;;      sourceReference
@@ -476,6 +476,10 @@ left-to-right display order of the properties."
   "Max length of file name in dape info buffers."
   :type 'integer)
 
+(defcustom dape-breakpoint-margin-string "B"
+  "String to display breakpoint in margin."
+  :type 'string)
+
 (defcustom dape-repl-use-shorthand t
   "Dape `dape-repl-commands' can be invokend with first char of command."
   :type 'boolean)
@@ -548,10 +552,6 @@ The hook is run with one argument, the compilation buffer."
   '((t :extend t))
   "Face used to display stack trace overlays.")
 
-(defface dape-stack-trace-pointer
-  '((t :inherit (bold default) :extend t))
-  "Face used to display stack trace overlays.")
-
 (defface dape-repl-exit-code-exit
   '((t :inherit compilation-mode-line-exit :extend t))
   "Face used in repl for exit code 0.")
@@ -622,7 +622,7 @@ Run step like COMMAND on CONN.  If ARG is set run COMMAND ARG times."
           (dape--remove-stack-pointers)
           (dolist (thread (dape--threads conn))
             (plist-put thread :status "running"))
-          (run-hook-with-args 'dape-update-ui-hooks conn)))
+          (run-hooks 'dape-update-ui-hooks)))
     (user-error "No stopped threads")))
 
 (defun dape--thread-id-object (conn)
@@ -1173,7 +1173,7 @@ See `dape--callback' for expected CB signature."
                 (plist-get (dape--capabilities conn)
                            :exceptionBreakpointFilters)))
   (dape--with dape--set-exception-breakpoints (conn)
-    (run-hook-with-args 'dape-update-ui-hooks conn)
+    (run-hooks 'dape-update-ui-hooks)
     (funcall cb conn)))
 
 (defun dape--set-breakpoints (conn cb)
@@ -1313,7 +1313,7 @@ See `dape--callback' for expected CB signature."
         (plist-put variable :variables nil)
         (cl-loop for (key value) on body by 'cddr
                  do (plist-put variable key value))
-        (run-hook-with-args 'dape-update-ui-hooks conn))))
+        (run-hooks 'dape-update-ui-hooks))))
    ((and (dape--capable-p conn :supportsSetExpression)
          (or (plist-get variable :evaluateName)
              (plist-get variable :name)))
@@ -1373,7 +1373,7 @@ If SKIP-STACK-POINTER-FLASH skip flashing after placing stack pointer."
     (dape--with dape--stack-trace (conn current-thread)
       (dape--update-stack-pointers conn skip-stack-pointer-flash)
       (dape--with dape--scopes (conn (dape--current-stack-frame conn))
-        (run-hook-with-args 'dape-update-ui-hooks conn)))))
+        (run-hooks 'dape-update-ui-hooks)))))
 
 
 ;;; Incoming requests
@@ -1513,7 +1513,7 @@ Stores `dape--thread-id' and updates/adds thread in
   ;; Select thread if we don't have any thread selected
   (unless (dape--thread-id conn)
     (setf (dape--thread-id conn) (plist-get body :threadId)))
-  (run-hook-with-args 'dape-update-ui-hooks conn))
+  (run-hooks 'dape-update-ui-hooks))
 
 (cl-defmethod dape-handle-event (conn (_event (eql stopped)) body)
   "Handle adapter CONNs stopped events.
@@ -1521,6 +1521,7 @@ Sets `dape--thread-id' from BODY and invokes ui refresh with
 `dape--update'."
   (dape--update-state conn 'stopped)
   (setf (dape--thread-id conn) (plist-get body :threadId))
+  (setf (dape--stack-id conn) nil)
   (dape--update-threads conn
                         (plist-get body :threadId)
                         (plist-get body :allThreadsStopped)
@@ -1593,7 +1594,7 @@ Killing the adapter and it's CONN."
     (unless dape-active-mode
       (dape-active-mode +1))
     (dape--update-state conn 'starting)
-    (run-hook-with-args 'dape-update-ui-hooks conn))
+    (run-hooks 'dape-update-ui-hooks))
   (dape--initialize conn))
 
 (defun dape--create-connection (config &optional parent)
@@ -1760,7 +1761,7 @@ CONN is inferred for interactive invocations."
       (dape--remove-stack-pointers)
       (dolist (thread (dape--threads conn))
         (plist-put thread :status "running"))
-      (run-hook-with-args 'dape-update-ui-hooks conn))))
+      (run-hooks 'dape-update-ui-hooks))))
 
 (defun dape-pause (conn)
   "Pause execution.
@@ -1857,7 +1858,9 @@ Will remove log or expression breakpoint at line added with
   (interactive)
   (if (dape--breakpoints-at-point '(dape-log-message dape-expr-message))
       (dape-breakpoint-remove-at-point '(dape-log-message dape-expr-message))
-    (dape--breakpoint-place)))
+    (dape--breakpoint-place))
+  (when-let ((conn (dape--live-connection t)))
+    (dape--update-stack-pointers conn t t)))
 
 (defun dape-breakpoint-log (log-message)
   "Add log breakpoint at line.
@@ -1914,7 +1917,9 @@ SKIP-TYPES is a list of overlay properties to skip removal of."
         (dolist (breakpoint breakpoints)
           (dape--breakpoint-remove breakpoint t))
         (when-let ((conn (dape--live-connection t)))
-          (dape--set-breakpoints-in-buffer conn buffer))))))
+          (dape--set-breakpoints-in-buffer conn buffer)))))
+  (when-let ((conn (dape--live-connection t)))
+    (dape--update-stack-pointers conn t t)))
 
 (defun dape-select-thread (conn thread-id)
   "Select currrent thread for adapter CONN by THREAD-ID."
@@ -1990,7 +1995,7 @@ Optional argument SKIP-REMOVE limits usage to only adding watched vars."
             dape--watched)
       ;; FIXME don't want to have a depency on info ui in core commands
       (dape--display-buffer (dape--info-buffer 'dape-info-watch-mode))))
-  (run-hook-with-args 'dape-update-ui-hooks (dape--live-connection t)))
+  (run-hooks 'dape-update-ui-hooks))
 
 (defun dape-evaluate-expression (conn expression)
   "Evaluate EXPRESSION.
@@ -2150,26 +2155,37 @@ Using BUFFER and STR."
         (when-let ((window (get-buffer-window buffer)))
           (set-window-buffer window buffer))))))
 
-(defun dape--overlay-icon (overlay string bitmap face)
-  "Put STRING or BITMAP on OVERLAY with FACE."
+(defun dape--overlay-icon (overlay string bitmap face &optional in-margin)
+  "Put STRING or BITMAP on OVERLAY with FACE.
+If IN-MARGING put STRING in margin, otherwise put overlay over buffer
+contents."
   (when-let ((buffer (overlay-buffer overlay)))
-    (let (before-string)
-      (cond
-       ((and (window-system) ;; running in term
-             (not (eql (frame-parameter (selected-frame) 'left-fringe) 0)))
-        (setq before-string
-              (propertize " " 'display
-                          `(left-fringe ,bitmap ,face))))
-       (t
-        (with-current-buffer buffer
-          (unless dape--original-margin
-            (setq-local dape--original-margin left-margin-width)
-            (setq left-margin-width 2)
-            (when-let ((window (get-buffer-window)))
-              (set-window-buffer window buffer))))
-        (setq before-string
-              (propertize " " 'display `((margin left-margin)
-                                         ,(propertize string 'face face))))))
+    (let ((before-string
+           (cond
+            ((and (window-system) ;; running in term
+                  (not (eql (frame-parameter (selected-frame) 'left-fringe) 0)))
+             (propertize " " 'display
+                         `(left-fringe ,bitmap ,face)))
+            (in-margin
+             (with-current-buffer buffer
+               (unless dape--original-margin
+                 (setq-local dape--original-margin left-margin-width)
+                 (setq left-margin-width 2)
+                 (when-let ((window (get-buffer-window)))
+                   (set-window-buffer window buffer))))
+             (propertize " " 'display `((margin left-margin)
+                                        ,(propertize string 'face face))))
+            (t
+             (move-overlay overlay
+                           (overlay-start overlay)
+                           (+ (overlay-start overlay)
+                              (min
+                               (length string)
+                               (with-current-buffer (overlay-buffer overlay)
+                                 (goto-char (overlay-start overlay))
+                                 (- (line-end-position) (overlay-start overlay))))))
+             (overlay-put overlay 'display "")
+             (propertize string 'face face)))))
       (overlay-put overlay 'before-string before-string))))
 
 (defun dape--breakpoint-freeze (overlay _after _begin _end &optional _len)
@@ -2198,8 +2214,9 @@ If SKIP-TYPES overlays with properties in SKIP-TYPES are filtered."
     (dolist (breakpoint breakpoints)
       (setq dape--breakpoints (delq breakpoint dape--breakpoints)))
   (when-let ((conn (dape--live-connection t)))
-    (dape--set-breakpoints-in-buffer conn (current-buffer))))
-  (run-hook-with-args 'dape-update-ui-hooks (dape--live-connection t)))
+    (when (dape--initialized-p conn)
+      (dape--set-breakpoints-in-buffer conn (current-buffer)))))
+  (run-hooks 'dape-update-ui-hooks))
 
 (defun dape--breakpoint-place (&optional log-message expression)
   "Place breakpoint at current line.
@@ -2228,16 +2245,18 @@ If EXPRESSION place conditional breakpoint."
                                               (format "Break: %s" expression)
                                               'face 'dape-expression-face))))
      (t
+      (overlay-put breakpoint 'dape-breakpoint t)
       (dape--overlay-icon breakpoint
-                          "●"
+                          dape-breakpoint-margin-string
                           'large-circle
-                          'dape-breakpoint-face)))
+                          'dape-breakpoint-face
+                          'in-margin)))
     (overlay-put breakpoint 'modification-hooks '(dape--breakpoint-freeze))
     (push breakpoint dape--breakpoints))
   (when-let ((conn (dape--live-connection t)))
     (dape--set-breakpoints-in-buffer conn (current-buffer)))
   (add-hook 'kill-buffer-hook 'dape--breakpoint-buffer-kill-hook nil t)
-  (run-hook-with-args 'dape-update-ui-hooks (dape--live-connection t)))
+  (run-hooks 'dape-update-ui-hooks))
 
 (defun dape--breakpoint-remove (overlay &optional skip-update)
   "Remove OVERLAY breakpoint from buffer and session.
@@ -2247,7 +2266,7 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
              (conn (dape--live-connection t)))
     (dape--set-breakpoints-in-buffer conn (overlay-buffer overlay)))
   (dape--margin-cleanup (overlay-buffer overlay))
-  (run-hook-with-args 'dape-update-ui-hooks (dape--live-connection t))
+  (run-hooks 'dape-update-ui-hooks)
   (delete-overlay overlay))
 
 
@@ -2285,7 +2304,8 @@ See `dape--callback' for expected CB signature."
                       (mode (alist-get mime dape-mime-mode-alist nil nil 'equal)))
                 (unless (eq major-mode mode)
                   (funcall mode))
-              (message "Unknown mime type %s, see `dape-mime-mode-alist'" (plist-get body :mimeType)))
+              (message "Unknown mime type %s, see `dape-mime-mode-alist'"
+                       (plist-get body :mimeType)))
             (setq-local buffer-read-only t
                         dape--source source)
             (let ((inhibit-read-only t))
@@ -2297,32 +2317,34 @@ See `dape--callback' for expected CB signature."
 
 ;;; Stack pointers
 
-(defvar dape--stack-position (make-marker)
-  "Dape stack position for marker `overlay-arrow-variable-list'.")
+(defvar dape--stack-position (make-overlay 0 0)
+  "Dape stack position overlay for arrow.")
 
 (defvar dape--stack-position-overlay nil
-  "Dape stack position overlay.")
+  "Dape stack position overlay for line.")
 
 (defun dape--remove-stack-pointers ()
   "Remove stack pointer marker."
-  (when-let ((buffer (marker-buffer dape--stack-position)))
+  (when-let ((buffer (overlay-buffer dape--stack-position)))
     (with-current-buffer buffer
       (dape--remove-eldoc-hook)))
   (when (overlayp dape--stack-position-overlay)
     (delete-overlay dape--stack-position-overlay))
-  (set-marker dape--stack-position nil))
+  (delete-overlay dape--stack-position))
 
-(defun dape--update-stack-pointers (conn &optional skip-stack-pointer-flash)
+(defun dape--update-stack-pointers (conn &optional
+                                         skip-stack-pointer-flash skip-goto)
   "Update stack pointer marker for adapter CONN.
 If SKIP-STACK-POINTER-FLASH is non nil refrain from flashing line."
   (dape--remove-stack-pointers)
   (when-let ((frame (dape--current-stack-frame conn)))
     (dape--with dape--source-ensure (conn frame)
-      (dape--goto-source frame
-                         ;; jsonrpc messes with set-buffer
-                         (with-current-buffer (car (buffer-list))
-                           (memq major-mode '(dape-repl-mode)))
-                         (not skip-stack-pointer-flash))
+      (unless skip-goto
+        (dape--goto-source frame
+                           ;; jsonrpc messes with set-buffer
+                           (with-current-buffer (car (buffer-list))
+                             (memq major-mode '(dape-repl-mode)))
+                           (not skip-stack-pointer-flash)))
       (when-let ((marker (dape--object-to-marker frame)))
         (with-current-buffer (marker-buffer marker)
           (dape--add-eldoc-hook)
@@ -2342,10 +2364,26 @@ If SKIP-STACK-POINTER-FLASH is non nil refrain from flashing line."
                                                 'dape-exception-description-face)
                                     "\n")))
                     ov))
-            (set-marker dape--stack-position
-                        (line-beginning-position))))))))
-
-(add-to-list 'overlay-arrow-variable-list 'dape--stack-position)
+            ;; HACK I don't believe that it's defined
+            ;;      behavior in which order fringe bitmaps
+            ;;      are displayed in, maybe it's the order
+            ;;      of overlay creation?
+            (setq dape--stack-position
+                  (make-overlay (line-beginning-position)
+                                (line-beginning-position)))
+            (dape--overlay-icon dape--stack-position
+                                overlay-arrow-string
+                                'right-triangle
+                                (cond
+                                 ((seq-find (lambda (ov)
+                                              (overlay-get ov 'dape-breakpoint))
+                                            (overlays-at (line-beginning-position)))
+                                  'dape-breakpoint-face)
+                                 ((eq frame (car (plist-get (dape--current-thread conn)
+                                                            :stackFrames)))
+                                  'default)
+                                 (t
+                                  'shadow)))))))))
 
 
 ;;; REPL buffer
@@ -2800,10 +2838,12 @@ FN is executed on mouse-2 and ?r, BODY is executed inside of let stmt."
        ,@body
        map)))
 
-(defun dape-info-update (conn)
+(defun dape-info-update (&optional conn)
   "Update and display `dape-info-*' buffers for adapter CONN."
   (dolist (buffer (dape--info-buffer-list))
-    (dape--info-update conn buffer)))
+    (dape--info-update (or conn
+                           (dape--live-connection t))
+                       buffer)))
 
 (defun dape-info (&optional maybe-close)
   "Update and display *dape-info* buffers.
@@ -2869,9 +2909,23 @@ buffers are already displayed."
   (dape--breakpoint-remove dape--info-breakpoint)
   (dape--display-buffer (dape--info-buffer 'dape-info-breakpoints-mode)))
 
+(dape--info-buffer-command dape-info-breakpoint-log-edit (dape--info-breakpoint)
+  "Edit breakpoint at line in dape info buffer."
+  (let ((edit-fn
+         (cond ((overlay-get dape--info-breakpoint 'dape-log-message)
+                'dape-breakpoint-log)
+               ((overlay-get dape--info-breakpoint 'dape-expr-message)
+                'dape-breakpoint-expression)
+               ((user-error "Unable to edit breakpoint on line without log or expression breakpoint")))))
+    (when-let* ((buffer (overlay-buffer dape--info-breakpoint)))
+      (with-selected-window (display-buffer buffer dape-display-source-buffer-action)
+        (goto-char (overlay-start dape--info-breakpoint))
+        (call-interactively edit-fn)))))
+
 (dape--info-buffer-map dape-info-breakpoints-line-map dape-info-breakpoint-goto
   (define-key map "D" 'dape-info-breakpoint-delete)
-  (define-key map "d" 'dape-info-breakpoint-delete))
+  (define-key map "d" 'dape-info-breakpoint-delete)
+  (define-key map "e" 'dape-info-breakpoint-log-edit))
 
 (dape--info-buffer-command dape-info-exceptions-toggle (dape--info-exception)
   "Toggle exception at line in dape info buffer."
@@ -2890,18 +2944,15 @@ buffers are already displayed."
 
 (cl-defmethod dape--info-buffer-update-contents
   (&context (major-mode dape-info-breakpoints-mode))
-  (let ((table (make-gdb-table))
-        (table-line 0))
-    (gdb-table-add-row table '("Num" "Type" "On" "Where" "What"))
+  (let ((table (make-gdb-table)))
+    (gdb-table-add-row table '("Type" "On" "Where" "What"))
     (dolist (breakpoint (reverse dape--breakpoints))
       (when-let* ((buffer (overlay-buffer breakpoint))
                   (line (with-current-buffer buffer
                           (line-number-at-pos (overlay-start breakpoint)))))
-        (setq table-line (1+ table-line))
         (gdb-table-add-row
          table
          (list
-          (format "%d" table-line)
           (cond
            ((overlay-get breakpoint 'dape-log-message)
             "log")
@@ -2924,10 +2975,8 @@ buffers are already displayed."
           'mouse-face 'highlight
           'help-echo "mouse-2, RET: visit breakpoint"))))
     (dolist (exception dape--exceptions)
-      (setq table-line (1+ table-line))
       (gdb-table-add-row table
                          (list
-                          (format "%d" table-line)
                           "exception"
                           (if (plist-get exception :enabled)
                               (propertize "y" 'font-lock-face
@@ -3083,12 +3132,10 @@ Updates from CURRENT-STACK-FRAME STACK-FRAMES."
    (t
     (cl-loop with table = (make-gdb-table)
              for frame in stack-frames
-             for line from 1
              do
              (gdb-table-add-row
               table
               (list
-               (format "%d" line)
                "in"
                (concat
                 (plist-get frame :name)
@@ -3786,11 +3833,7 @@ Initial contents defaults to valid configuration if there is only one
 or last mode valid history item from this session.
 
 See `dape--config-mode-p' how \"valid\" is defined."
-  (let* ((from-dape-commands
-          (cl-loop for (key . config) in dape-commands
-                   when (dape--config-ensure config)
-                   collect (dape--config-to-string key config)))
-         (suggested-configs
+  (let* ((suggested-configs
           (cl-loop for (key . config) in dape-configs
                    when (and (dape--config-mode-p config)
                              (dape--config-ensure config))
@@ -3798,7 +3841,9 @@ See `dape--config-mode-p' how \"valid\" is defined."
          (initial-contents
           (or
            ;; Take `dape-command' if exist
-           (car from-dape-commands)
+           (when dape-command
+             (dape--config-to-string (car dape-command)
+                                     (cdr dape-command)))
            ;; Take first valid history item
            (seq-find (lambda (str)
                        (ignore-errors
@@ -3814,8 +3859,7 @@ See `dape--config-mode-p' how \"valid\" is defined."
           dape--minibuffer-cache nil)
     (minibuffer-with-setup-hook
         (lambda ()
-          (setq-local dape--minibuffer-suggestions
-                      (append from-dape-commands suggested-configs)
+          (setq-local dape--minibuffer-suggestions suggested-configs
                       comint-completion-addsuffix nil
                       resize-mini-windows t
                       max-mini-window-height 0.5
