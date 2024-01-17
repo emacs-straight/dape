@@ -68,7 +68,21 @@
   :type 'string)
 
 (defcustom dape-configs
-  `(,@(let ((codelldb
+  `((attach
+     modes nil
+     ensure (lambda (config)
+              (unless (plist-get config 'port)
+                (user-error "Missing `port' property")))
+     host "localhost"
+     :request "attach")
+    (launch
+     modes nil
+     command-cwd dape-command-cwd
+     ensure (lambda (config)
+              (unless (plist-get config 'command)
+                (user-error "Missing `command' property")))
+     :request "launch")
+    ,@(let ((codelldb
              `(ensure dape-ensure-command
                command-cwd dape-command-cwd
                command ,(file-name-concat dape-adapter-dir
@@ -175,9 +189,11 @@
                            (unless (file-exists-p js-debug-file)
                              (user-error "File %S does not exist" js-debug-file))))
                command "node"
-               command-cwd ,(file-name-concat dape-adapter-dir
-                                              "js-debug")
-               command-args (,(file-name-concat "src" "dapDebugServer.js")
+               command-args (,(expand-file-name
+                               (file-name-concat dape-adapter-dir
+                                                 "js-debug"
+                                                 "src"
+                                                 "dapDebugServer.js"))
                              :autoport)
                port :autoport
                fn dape-config-autoport)))
@@ -531,24 +547,23 @@ The hook is run with one argument, the compilation buffer."
 
 
 ;;; Face
+(defface dape-breakpoint-face
+  '((t :inherit (font-lock-keyword-face)))
+  "Face used to display breakpoint overlays.")
 
 (defface dape-log-face
-  '((t :inherit (font-lock-doc-face)
+  '((t :inherit (font-lock-string-face)
        :height 0.85 :box (:line-width -1)))
   "Face used to display log breakpoints.")
 
 (defface dape-expression-face
-  '((t :inherit (font-lock-warning-face)
+  '((t :inherit (dape-breakpoint-face)
        :height 0.85 :box (:line-width -1)))
   "Face used to display conditional breakpoints.")
 
 (defface dape-exception-description-face
   '((t :inherit (error tooltip)))
   "Face used to display exception descriptions inline.")
-
-(defface dape-breakpoint-face
-  '((t :inherit (font-lock-keyword-face)))
-  "Face used to display breakpoint overlays.")
 
 (defface dape-stack-trace
   '((t :extend t))
@@ -903,7 +918,7 @@ On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
         (cons '(display-buffer-in-side-window)
               (pcase mode
                 ('dape-repl-mode '((side . bottom) (slot . -1)))
-                ('shell-mode '((side . bottom) (slot . 1)))
+                ('shell-mode '((side . bottom) (slot . 0)))
                 ((or 'dape-info-scope-mode 'dape-info-watch-mode)
                  `((side . ,dape-buffer-window-arrangement) (slot . -1)))
                 ((or 'dape-info-stack-mode 'dape-info-modules-mode
@@ -1697,7 +1712,10 @@ symbol `dape-connection'."
                    (lambda (conn)
                      ;; error prints
                      (unless (dape--initialized-p conn)
-                       (dape--repl-message "Adapter connection shutdown without successfully initializing"
+                       (dape--repl-message (concat "Adapter "
+                                                   (when (dape--parent conn)
+                                                     "child ")
+                                                   "connection shutdown without successfully initializing")
                                            'error)
                        ; barf config
                        (dape--repl-message
@@ -2026,18 +2044,17 @@ Optional argument SKIP-REMOVE limits usage to only adding watched vars."
   (run-hooks 'dape-update-ui-hooks))
 
 (defun dape-evaluate-expression (conn expression)
-  "Evaluate EXPRESSION.
+  "Evaluate EXPRESSION, if region is active evaluate region.
 EXPRESSION can be an expression or adapter command, as it's evaluated in
 repl context.  CONN is inferred for interactive invocations."
   (interactive
    (list
     (dape--live-connection)
-    (string-trim
-     (read-string "Evaluate: "
-                  (or (and (region-active-p)
-                           (buffer-substring (region-beginning)
-                                             (region-end)))
-                      (thing-at-point 'symbol))))))
+    (if (region-active-p)
+        (buffer-substring (region-beginning)
+                          (region-end))
+      (read-string "Evaluate: "
+                   (thing-at-point 'symbol)))))
   (dape--with dape--evaluate-expression
       (conn
        (plist-get (dape--current-stack-frame conn) :id)
@@ -2258,20 +2275,47 @@ If EXPRESSION place conditional breakpoint."
     (cond
      (log-message
       (overlay-put breakpoint 'dape-log-message log-message)
-      ;; TODO Add keybinds for removal and change of log message
-      (overlay-put breakpoint 'after-string (concat
-                                             " "
-                                             (propertize
-                                              (format "Log: %s" log-message)
-                                              'face 'dape-log-face))))
+      (overlay-put breakpoint 'after-string
+                   (concat
+                    " "
+                    (propertize (format "Log: %s" log-message)
+                                'face 'dape-log-face
+                                'mouse-face 'highlight
+                                'help-echo "mouse-1: edit log message"
+                                'keymap
+                                (let ((map (make-sparse-keymap)))
+                                  (define-key map [mouse-1]
+                                              (lambda (event)
+                                                (interactive "e")
+                                                (save-selected-window
+                                                  (let ((start (event-start event)))
+                                                    (select-window (posn-window start))
+                                                    (save-excursion
+                                                      (goto-char (posn-point start))
+                                                      (call-interactively 'dape-breakpoint-log))))))
+                                  map)))))
      (expression
       (overlay-put breakpoint 'dape-expr-message expression)
-      ;; TODO Add keybinds for removal and change of expression message
-      (overlay-put breakpoint 'after-string (concat
-                                             " "
-                                             (propertize
-                                              (format "Break: %s" expression)
-                                              'face 'dape-expression-face))))
+      (overlay-put breakpoint 'after-string
+                   (concat
+                    " "
+                    (propertize
+                     (format "Break: %s" expression)
+                     'face 'dape-expression-face
+                     'mouse-face 'highlight
+                     'help-echo "mouse-1: edit break expression"
+                     'keymap
+                     (let ((map (make-sparse-keymap)))
+                       (define-key map [mouse-1]
+                                   (lambda (event)
+                                     (interactive "e")
+                                     (save-selected-window
+                                       (let ((start (event-start event)))
+                                         (select-window (posn-window start))
+                                         (save-excursion
+                                           (goto-char (posn-point start))
+                                           (call-interactively 'dape-breakpoint-expression))))))
+                       map)))))
      (t
       (overlay-put breakpoint 'dape-breakpoint t)
       (dape--overlay-icon breakpoint
@@ -3624,6 +3668,7 @@ Buffer is specified by MODE and ID."
               (cl-loop with base-config = (alist-get hint-key dape-configs)
                        for (key value) on hint-config by 'cddr
                        unless (or (memq key dape-minibuffer-hint-ignore-properties)
+                                  (and (eq key 'port) (eq value :autoport))
                                   (eq key 'ensure))
                        collect (concat
                                 (propertize (format "%s" key)
@@ -3996,7 +4041,7 @@ See `eldoc-documentation-functions', for more infomation."
     (define-key map "S" #'dape-select-stack)
     (define-key map (kbd "C-i") #'dape-stack-select-down)
     (define-key map (kbd "C-o") #'dape-stack-select-up)
-    (define-key map "E" #'dape-evaluate-expression)
+    (define-key map "x" #'dape-evaluate-expression)
     (define-key map "w" #'dape-watch-dwim)
     (define-key map "D" #'dape-disconnect-quit)
     (define-key map "q" #'dape-quit)
