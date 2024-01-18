@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.21"))
 
@@ -263,9 +263,7 @@
      ;; bundle exec rake test
      -c ,(defun dape--rdbg-c ()
            (format "ruby %s"
-                   (thread-first (or (dape-buffer-default) "")
-                                 (file-relative-name (dape-cwd))
-                                 (tramp-file-local-name)))))
+                   (or (dape-buffer-default) ""))))
     (jdtls
      modes (java-mode java-ts-mode)
      ensure (lambda (config)
@@ -309,7 +307,7 @@
          `(:filePath
            ,(defun dape--jdtls-file-path ()
               (or (resolve-main-class :filePath)
-                  (expand-file-name (dape-buffer-default))))
+                  (expand-file-name (dape-buffer-default) (dape-cwd))))
            :mainClass
            ,(defun dape--jdtls-main-class ()
               (or (resolve-main-class :mainClass) ""))
@@ -767,7 +765,8 @@ If PULSE pulse on after opening file."
 
 (defun dape-buffer-default ()
   "Return current buffers file name."
-  (file-name-nondirectory (tramp-file-local-name (buffer-file-name))))
+  (tramp-file-local-name
+   (file-relative-name (buffer-file-name) (dape-command-cwd))))
 
 (defun dape--guess-root (config)
   "Guess adapter path root from CONFIG."
@@ -944,6 +943,18 @@ On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
           (_ (error "Unable to display buffer of mode `%s'" mode))))
        (_ (user-error "Invalid value of `dape-buffer-window-arrangement'"))))))
 
+(defmacro dape--mouse-command (name doc command)
+  "Create mouse command with NAME, DOC which runs COMMANDS."
+  (declare (indent 1))
+  `(defun ,name (event)
+     ,doc
+     (interactive "e")
+     (save-selected-window
+       (let ((start (event-start event)))
+         (select-window (posn-window start))
+         (save-excursion
+           (goto-char (posn-point start))
+           (call-interactively ',command))))))
 
 
 ;;; Connection
@@ -1878,13 +1889,14 @@ CONN is inferred for interactive invocations."
     (dape--kill-buffers)))
 
 (defun dape-breakpoint-toggle ()
-  "Add or remove breakpoint at current line.
-Will remove log or expression breakpoint at line added with
-`dape-breakpoint-log' and/or `dape-breakpoint-expression'."
+  "Add or remove breakpoint at current line."
   (interactive)
-  (if (dape--breakpoints-at-point '(dape-log-message dape-expr-message))
-      (dape-breakpoint-remove-at-point '(dape-log-message dape-expr-message))
+  (cond
+   ((not (dape--breakpoints-at-point '(dape-log-message dape-expr-message)))
+    (dape-breakpoint-remove-at-point 'skip-update)
     (dape--breakpoint-place))
+   (t
+    (dape-breakpoint-remove-at-point)))
   (when-let ((conn (dape--live-connection t)))
     (dape--update-stack-pointers conn t t)))
 
@@ -1900,12 +1912,14 @@ Expressions within `{}` are interpolated."
                                          (overlay-get ov 'dape-log-message))
                                        (dape--breakpoints-at-point))))
                    (overlay-get prev-log-breakpoint 'dape-log-message)))))
-  (when-let ((prev-log-breakpoint (seq-find (lambda (ov)
-                                              (overlay-get ov 'dape-log-message))
-                                            (dape--breakpoints-at-point))))
-    (dape--breakpoint-remove prev-log-breakpoint))
-  (unless (string-empty-p log-message)
+  (cond
+   ((string-empty-p log-message)
+    (dape-breakpoint-remove-at-point))
+   (t
+    (dape-breakpoint-remove-at-point 'skip-update)
     (dape--breakpoint-place log-message)))
+  (when-let ((conn (dape--live-connection t)))
+    (dape--update-stack-pointers conn t t)))
 
 (defun dape-breakpoint-expression (expr-message)
   "Add expression breakpoint at current line.
@@ -1918,32 +1932,32 @@ When EXPR-MESSAGE is evaluated as true threads will pause at current line."
                                          (overlay-get ov 'dape-expr-message))
                                        (dape--breakpoints-at-point))))
                    (overlay-get prev-expr-breakpoint 'dape-expr-message)))))
-  (when-let ((prev-expr-breakpoint
-              (seq-find (lambda (ov)
-                          (overlay-get ov 'dape-expr-message))
-                        (dape--breakpoints-at-point))))
-    (dape--breakpoint-remove prev-expr-breakpoint))
-  (unless (string-empty-p expr-message)
+  (cond
+   ((string-empty-p expr-message)
+    (dape-breakpoint-remove-at-point))
+   (t
+    (dape-breakpoint-remove-at-point 'skip-update)
     (dape--breakpoint-place nil expr-message)))
+  (when-let ((conn (dape--live-connection t)))
+    (dape--update-stack-pointers conn t t)))
 
-(defun dape-breakpoint-remove-at-point (&optional skip-types)
+(defun dape-breakpoint-remove-at-point (&optional skip-update)
   "Remove breakpoint, log breakpoint and expression at current line.
-SKIP-TYPES is a list of overlay properties to skip removal of."
+When SKIP-UPDATE is non nil, does not notify adapter about removal."
   (interactive)
-  (dolist (breakpoint (dape--breakpoints-at-point skip-types))
-    (dape--breakpoint-remove breakpoint)))
+  (dolist (breakpoint (dape--breakpoints-at-point))
+    (dape--breakpoint-remove breakpoint skip-update)))
 
 (defun dape-breakpoint-remove-all ()
   "Remove all breakpoints."
   (interactive)
-  (let ((buffers-breakpoints (seq-group-by 'overlay-buffer
-                                           dape--breakpoints)))
-    (dolist (buffer-breakpoints buffers-breakpoints)
-      (pcase-let ((`(,buffer . ,breakpoints) buffer-breakpoints))
-        (dolist (breakpoint breakpoints)
-          (dape--breakpoint-remove breakpoint t))
-        (when-let ((conn (dape--live-connection t)))
-          (dape--set-breakpoints-in-buffer conn buffer)))))
+  (let ((buffers-breakpoints
+         (seq-group-by 'overlay-buffer dape--breakpoints)))
+    (pcase-dolist (`(,buffer . ,breakpoints) buffers-breakpoints)
+      (dolist (breakpoint breakpoints)
+        (dape--breakpoint-remove breakpoint t))
+      (when-let ((conn (dape--live-connection t)))
+        (dape--set-breakpoints-in-buffer conn buffer))))
   (when-let ((conn (dape--live-connection t)))
     (dape--update-stack-pointers conn t t)))
 
@@ -2055,12 +2069,19 @@ repl context.  CONN is inferred for interactive invocations."
                           (region-end))
       (read-string "Evaluate: "
                    (thing-at-point 'symbol)))))
-  (dape--with dape--evaluate-expression
-      (conn
-       (plist-get (dape--current-stack-frame conn) :id)
-       (substring-no-properties expression)
-       "repl")
-      (message "%s" (plist-get body :result))))
+  (let ((interactive-p (called-interactively-p 'any)))
+    (dape--with dape--evaluate-expression
+        (conn
+         (plist-get (dape--current-stack-frame conn) :id)
+         (substring-no-properties expression)
+         "repl")
+      (when interactive-p
+        (let ((result (plist-get body :result)))
+          (message "%s"
+                   (or (and (stringp result)
+                            (not (string-empty-p result))
+                            result)
+                       "Evaluation done")))))))
 
 ;;;###autoload
 (defun dape (config &optional skip-compile)
@@ -2159,20 +2180,26 @@ Using BUFFER and STR."
 
 ;;; Breakpoints
 
-(defun dape-mouse-breakpoint-toggle (event)
-  "Toggle breakpoint at EVENT."
-  (interactive "e")
-  (save-selected-window
-    (let ((start (event-start event)))
-      (select-window (posn-window start))
-      (save-excursion
-        (goto-char (posn-point start))
-        (dape-breakpoint-toggle)))))
+(dape--mouse-command dape-mouse-breakpoint-toggle
+  "Toggle breakpoint at line."
+  dape-breakpoint-toggle)
+
+(dape--mouse-command dape-mouse-breakpoint-expression
+  "Add log expression at line."
+  dape-breakpoint-expression)
+
+(dape--mouse-command dape-mouse-breakpoint-log
+  "Add log breakpoint at line."
+  dape-breakpoint-log)
 
 (defvar dape-breakpoint-global-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map [left-fringe mouse-1] 'dape-mouse-breakpoint-toggle)
     (define-key map [left-margin mouse-1] 'dape-mouse-breakpoint-toggle)
+    (define-key map [left-fringe mouse-2] 'dape-mouse-breakpoint-expression)
+    (define-key map [left-margin mouse-2] 'dape-mouse-breakpoint-expression)
+    (define-key map [left-fringe mouse-3] 'dape-mouse-breakpoint-log)
+    (define-key map [left-margin mouse-3] 'dape-mouse-breakpoint-log)
     map)
   "Keymap for `dape-breakpoint-global-mode'.")
 
@@ -2284,15 +2311,7 @@ If EXPRESSION place conditional breakpoint."
                                 'help-echo "mouse-1: edit log message"
                                 'keymap
                                 (let ((map (make-sparse-keymap)))
-                                  (define-key map [mouse-1]
-                                              (lambda (event)
-                                                (interactive "e")
-                                                (save-selected-window
-                                                  (let ((start (event-start event)))
-                                                    (select-window (posn-window start))
-                                                    (save-excursion
-                                                      (goto-char (posn-point start))
-                                                      (call-interactively 'dape-breakpoint-log))))))
+                                  (define-key map [mouse-1] #'dape-mouse-breakpoint-log)
                                   map)))))
      (expression
       (overlay-put breakpoint 'dape-expr-message expression)
@@ -2306,15 +2325,7 @@ If EXPRESSION place conditional breakpoint."
                      'help-echo "mouse-1: edit break expression"
                      'keymap
                      (let ((map (make-sparse-keymap)))
-                       (define-key map [mouse-1]
-                                   (lambda (event)
-                                     (interactive "e")
-                                     (save-selected-window
-                                       (let ((start (event-start event)))
-                                         (select-window (posn-window start))
-                                         (save-excursion
-                                           (goto-char (posn-point start))
-                                           (call-interactively 'dape-breakpoint-expression))))))
+                       (define-key map [mouse-1] #'dape-mouse-breakpoint-expression)
                        map)))))
      (t
       (overlay-put breakpoint 'dape-breakpoint t)
@@ -2410,7 +2421,8 @@ See `dape--callback' for expected CB signature."
 If SKIP-STACK-POINTER-FLASH is non nil refrain from flashing line.
 If SKIP-GOTO is non nil refrain from going to selected stack."
   (dape--remove-stack-pointers)
-  (when-let ((frame (dape--current-stack-frame conn)))
+  (when-let (((dape--stopped-threads conn))
+             (frame (dape--current-stack-frame conn)))
     (let ((deepest-p (eq frame (car (plist-get (dape--current-thread conn)
                                                :stackFrames)))))
       (dape--with dape--source-ensure (conn frame)
@@ -2553,8 +2565,9 @@ Send INPUT to DUMMY-PROCESS."
   "Completion at point function for *dape-repl* buffer."
   (when (or (symbol-at-point)
             (member (buffer-substring-no-properties (1- (point)) (point))
-                    (or (plist-get (dape--capabilities (dape--live-connection t))
-                                   :completionTriggerCharacters)
+                    (or (append (plist-get (dape--capabilities (dape--live-connection t))
+                                           :completionTriggerCharacters)
+                                nil)
                         '("."))))
     (let* ((bounds (save-excursion
                      (cons (and (skip-chars-backward "^\s")
