@@ -55,6 +55,10 @@
 (require 'jsonrpc)
 (require 'eglot) ;; jdtls config
 
+(unless (package-installed-p 'jsonrpc '(1 0 21))
+  (error "dape: Requires jsonrpc version >= 1.0.21, use `list-packages'\
+ to install latest `jsonrpc' release from elpa"))
+
 
 ;;; Custom
 (defgroup dape nil
@@ -179,7 +183,7 @@
      :type "server"
      :cwd dape-cwd)
     ,@(let ((js-debug
-             `(modes (js-mode js-ts-mode)
+             `(modes (js-mode js-ts-mode typescript-mode typescript-ts-mode)
                ensure ,(lambda (config)
                          (dape-ensure-command config)
                          (let ((js-debug-file
@@ -425,7 +429,7 @@ Each element should look like (MIME-TYPE . MODE) where
   "Hook to run on session start."
   :type 'hook)
 
-(defcustom dape-on-stopped-hooks '()
+(defcustom dape-on-stopped-hooks '(dape--emacs-grab-focus)
   "Hook to run on session stopped."
   :type 'hook)
 
@@ -549,21 +553,21 @@ The hook is run with one argument, the compilation buffer."
 
 
 ;;; Face
-(defface dape-breakpoint-face
+(defface dape-breakpoint
   '((t :inherit (font-lock-keyword-face)))
   "Face used to display breakpoint overlays.")
 
-(defface dape-log-face
+(defface dape-log
   '((t :inherit (font-lock-string-face)
        :height 0.85 :box (:line-width -1)))
   "Face used to display log breakpoints.")
 
-(defface dape-expression-face
-  '((t :inherit (dape-breakpoint-face)
+(defface dape-expression
+  '((t :inherit (dape-breakpoint)
        :height 0.85 :box (:line-width -1)))
   "Face used to display conditional breakpoints.")
 
-(defface dape-exception-description-face
+(defface dape-exception-description
   '((t :inherit (error tooltip)))
   "Face used to display exception descriptions inline.")
 
@@ -571,11 +575,11 @@ The hook is run with one argument, the compilation buffer."
   '((t :extend t))
   "Face used to display stack trace overlays.")
 
-(defface dape-repl-exit-code-exit
+(defface dape-repl-success
   '((t :inherit compilation-mode-line-exit :extend t))
   "Face used in repl for exit code 0.")
 
-(defface dape-repl-exit-code-fail
+(defface dape-repl-error
   '((t :inherit compilation-mode-line-fail :extend t))
   "Face used in repl for non 0 exit codes.")
 
@@ -941,6 +945,10 @@ On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
            (goto-char (posn-point start))
            (call-interactively ',command))))))
 
+(defun dape--emacs-grab-focus ()
+  "If `display-graphic-p' focus emacs."
+  (select-frame-set-input-focus (selected-frame)))
+
 
 ;;; Connection
 
@@ -1068,7 +1076,7 @@ and success.  See `dape--callback' for signature."
                          (when (functionp cb)
                            (lambda ()
                              (dape--repl-message
-                              (format "* Command %s timeout *" command) 'error)
+                              (format "* Command %s timeout *" command) 'dape-repl-error)
                              (funcall cb conn nil "timeout")))))
 
 (defun dape--initialize (conn)
@@ -1097,7 +1105,7 @@ and success.  See `dape--callback' for signature."
         (progn
           (dape--repl-message (format "Initialize failed due to: %s"
                                       error-message)
-                              'dape-repl-exit-code-fail)
+                              'dape-repl-error)
           (dape-kill conn))
       (setf (dape--capabilities conn) body)
       (dape--with dape-request
@@ -1107,7 +1115,7 @@ and success.  See `dape--callback' for signature."
                     when (keywordp key)
                     append (list key (or value :json-false))))
         (if error-message
-            (progn (dape--repl-message error-message 'dape-repl-exit-code-fail)
+            (progn (dape--repl-message error-message 'dape-repl-error)
                    (dape-kill conn))
           (setf (dape--initialized-p conn) t))))))
 
@@ -1425,7 +1433,7 @@ Starts a new adapter CONNs from ARGUMENTS."
                          buffer
                          buffer)
     (dape--display-buffer buffer)
-    nil))
+    (list :processId (process-id (get-buffer-process buffer)))))
 
 (cl-defmethod dape-handle-request (conn (_command (eql startDebugging)) arguments)
   "Handle adapter CONNs startDebugging requests with ARGUMENTS.
@@ -1565,7 +1573,7 @@ Sets `dape--thread-id' from BODY and invokes ui refresh with
                                 (plist-get body :description)))))
       (let ((str (mapconcat 'identity texts ":\n\t")))
         (setf (dape--exception-description conn) str)
-        (dape--repl-message str 'dape-repl-exit-code-fail))
+        (dape--repl-message str 'dape-repl-error))
     (setf (dape--exception-description conn) nil))
   (run-hooks 'dape-on-stopped-hooks))
 
@@ -1583,7 +1591,7 @@ Sets `dape--thread-id' from BODY if not set."
     ("stdout"
      (dape--repl-message (plist-get body :output)))
     ("stderr"
-     (dape--repl-message (plist-get body :output) 'error))
+     (dape--repl-message (plist-get body :output) 'dape-repl-error))
     ((or "console" "output")
      (dape--repl-message (plist-get body :output)))))
 
@@ -1595,8 +1603,8 @@ Prints exit code from BODY."
   (dape--repl-message (format "* Exit code: %d *"
                               (plist-get body :exitCode))
                       (if (zerop (plist-get body :exitCode))
-                          'dape-repl-exit-code-exit
-                        'dape-repl-exit-code-fail)))
+                          'dape-repl-success
+                        'dape-repl-error)))
 
 (cl-defmethod dape-handle-event (conn (_event (eql terminated)) _body)
   "Handle adapter CONNs terminated events.
@@ -1686,13 +1694,13 @@ symbol `dape-connection'."
             (progn
               (dape--repl-message (format "Unable to connect to server %s:%d"
                                           host (plist-get config 'port))
-                                  'error)
+                                  'dape-repl-error)
               ;; barf server std-err
               (when-let ((buffer
                           (and server-process
                                (process-get server-process 'stderr-buffer))))
                 (with-current-buffer buffer
-                  (dape--repl-message (buffer-string) 'error)))
+                  (dape--repl-message (buffer-string) 'dape-repl-error)))
               (delete-process server-process)
               (user-error "Unable to connect to server"))
           (when dape-debug
@@ -1732,24 +1740,23 @@ symbol `dape-connection'."
                                                    (when (dape--parent conn)
                                                      "child ")
                                                    "connection shutdown without successfully initializing")
-                                           'error)
+                                           'dape-repl-error)
                        ; barf config
                        (dape--repl-message
                         (format "Configuration:\n%s"
                                 (cl-loop for (key value) on (dape--config conn) by 'cddr
                                          concat (format "  %s %S\n" key value)))
-                        'error)
+                        'dape-repl-error)
                        ;; barf connection stderr
                        (when-let* ((proc (jsonrpc--process conn))
                                    (buffer (process-get proc 'jsonrpc-stderr)))
                          (with-current-buffer buffer
-                           (dape--repl-message (buffer-string) 'error)))
+                           (dape--repl-message (buffer-string) 'dape-repl-error)))
                        ;; barf server stderr
                        (when-let* ((server-proc (dape--server-process conn))
                                    (buffer (process-get server-proc 'stderr-buffer)))
                          (with-current-buffer buffer
-                           (dape--repl-message (buffer-string)
-                                               'error))))
+                           (dape--repl-message (buffer-string) 'dape-repl-error))))
                      ;; cleanup server process
                      (if-let ((parent (dape--parent conn)))
                          (setq dape--connection parent)
@@ -2304,7 +2311,7 @@ that breakpoint as DAP only supports one breakpoint per line."
                    (concat
                     " "
                     (propertize (format "Log: %s" log-message)
-                                'face 'dape-log-face
+                                'face 'dape-log
                                 'mouse-face 'highlight
                                 'help-echo "mouse-1: edit log message"
                                 'keymap
@@ -2318,7 +2325,7 @@ that breakpoint as DAP only supports one breakpoint per line."
                     " "
                     (propertize
                      (format "Break: %s" expression)
-                     'face 'dape-expression-face
+                     'face 'dape-expression
                      'mouse-face 'highlight
                      'help-echo "mouse-1: edit break expression"
                      'keymap
@@ -2330,7 +2337,7 @@ that breakpoint as DAP only supports one breakpoint per line."
       (dape--overlay-icon breakpoint
                           dape-breakpoint-margin-string
                           'large-circle
-                          'dape-breakpoint-face
+                          'dape-breakpoint
                           'in-margin)))
     (overlay-put breakpoint 'modification-hooks '(dape--breakpoint-freeze))
     (push breakpoint dape--breakpoints)
@@ -2426,7 +2433,7 @@ See `dape--callback' for expected CB signature."
                                  :source source
                                  :sourceReference source-reference))
         (when error-message
-          (dape--repl-message (format "%s" error-message) 'warning))
+          (dape--repl-message (format "%s" error-message) 'dape-repl-error))
         (when-let ((content (plist-get body :content))
                    (buffer
                     (generate-new-buffer (format "*dape-source %s*"
@@ -2511,7 +2518,7 @@ If SKIP-DISPLAY is non nil refrain from going to selected stack."
                                        (concat
                                         (propertize exception-description
                                                     'face
-                                                    'dape-exception-description-face)
+                                                    'dape-exception-description)
                                         "\n"))))
                       ov))
               ;; HACK I don't believe that it's defined
@@ -2528,7 +2535,7 @@ If SKIP-DISPLAY is non nil refrain from going to selected stack."
                                    ((seq-filter (lambda (ov)
                                                   (overlay-get ov 'dape-breakpoint))
                                                 (dape--breakpoints-at-point))
-                                    'dape-breakpoint-face)
+                                    'dape-breakpoint)
                                    (deepest-p
                                     'default)
                                    (t
@@ -3130,10 +3137,10 @@ When optional kill is non nil kill buffers *dape-info* buffers."
           (cond
            ((overlay-get breakpoint 'dape-log-message)
             (propertize (overlay-get breakpoint 'dape-log-message)
-                        'face 'dape-log-face))
+                        'face 'dape-log))
            ((overlay-get breakpoint 'dape-expr-message)
             (propertize (overlay-get breakpoint 'dape-expr-message)
-                        'face 'dape-expression-face))
+                        'face 'dape-expression))
            ("")))
          (list
           'dape--info-breakpoint breakpoint
