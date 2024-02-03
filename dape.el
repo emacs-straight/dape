@@ -8,7 +8,7 @@
 ;; License: GPL-3.0-or-later
 ;; Version: 0.5.0
 ;; Homepage: https://github.com/svaante/dape
-;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.21"))
+;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.24"))
 
 ;; This file is not part of GNU Emacs.
 
@@ -55,8 +55,8 @@
 (require 'jsonrpc)
 (require 'eglot) ;; jdtls config
 
-(unless (package-installed-p 'jsonrpc '(1 0 21))
-  (error "dape: Requires jsonrpc version >= 1.0.21, use `list-packages'\
+(unless (package-installed-p 'jsonrpc '(1 0 24))
+  (error "dape: Requires jsonrpc version >= 1.0.24, use `list-packages'\
  to install latest `jsonrpc' release from elpa"))
 
 
@@ -1449,8 +1449,7 @@ Starts a new adapter connection as per request of the debug adapter."
     (let ((new-connection
            (dape--create-connection config (or (dape--parent conn)
                                                conn))))
-      (unless (dape--thread-id conn)
-        (setq dape--connection new-connection))
+      (setq dape--connection new-connection)
       (dape--start-debugging new-connection)))
   nil)
 
@@ -1729,9 +1728,8 @@ symbol `dape-connection'."
                    :config config
                    :parent parent
                    :server-process server-process
-                   ;; FIXME needs to update jsonrcp
-                   ;; :events-buffer-config `(:size ,(if dape-debug nil 0)
-                   ;;                               :format full)
+                   :events-buffer-config `(:size ,(if dape-debug nil 0)
+                                                 :format full)
                    :on-shutdown
                    (lambda (conn)
                      ;; error prints
@@ -1858,8 +1856,11 @@ terminate.  CONN is inferred for interactive invocations."
                        (dape-kill cb 'with-disconnect)
                      (unless skip-shutdown
                        (jsonrpc-shutdown conn))
-                     (when (functionp cb)
-                       (funcall cb))))))
+                     (if-let* (((not skip-shutdown))
+                               (parent (dape--parent conn)))
+                         (dape-kill parent cb with-disconnect skip-shutdown)
+                       (when (functionp cb)
+                         (funcall cb)))))))
    ((and conn
          (jsonrpc-running-p conn))
     (dape-request conn
@@ -1871,8 +1872,11 @@ terminate.  CONN is inferred for interactive invocations."
                   (dape--callback
                    (unless skip-shutdown
                      (jsonrpc-shutdown conn))
-                   (when (functionp cb)
-                     (funcall cb)))))
+                   (if-let* (((not skip-shutdown))
+                             (parent (dape--parent conn)))
+                       (dape-kill parent cb with-disconnect skip-shutdown)
+                     (when (functionp cb)
+                       (funcall cb))))))
    (t
     (when (functionp cb)
       (funcall cb)))))
