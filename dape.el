@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.5.0
+;; Version: 0.6.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.24"))
 
@@ -98,13 +98,14 @@
                fn dape-config-autoport
                :type "lldb"
                :request "launch"
-               :cwd "."
-               :args [])))
+               :cwd "."))
+            (common `(:args [] :stopOnEntry nil)))
         `((codelldb-cc
            modes (c-mode c-ts-mode c++-mode c++-ts-mode)
            command-args ("--port" :autoport)
            ,@codelldb
-           :program "a.out")
+           :program "a.out"
+           ,@common)
           (codelldb-rust
            modes (rust-mode rust-ts-mode)
            command-args ("--port" :autoport
@@ -116,7 +117,8 @@
                                                        (directory-file-name)
                                                        (file-name-split)
                                                        (last)
-                                                       (car)))))))
+                                                       (car))))
+           ,@common)))
     (cpptools
      modes (c-mode c-ts-mode c++-mode c++-ts-mode)
      ensure dape-ensure-command
@@ -150,6 +152,7 @@
      :type "executable"
      :cwd dape-cwd
      :program dape-buffer-default
+     :args []
      :justMyCode nil
      :console "integratedTerminal"
      :showReturnValue t
@@ -215,7 +218,6 @@
           (js-debug-chrome
            ,@js-debug
            :type "pwa-chrome"
-           :trace t
            :url "http://localhost:3000"
            :webRoot dape-cwd
            :outputCapture "console")))
@@ -1200,20 +1202,26 @@ and success.  See `dape--callback' for signature."
 (defun dape--set-breakpoints-in-buffer (conn buffer &optional cb)
   "Set breakpoints in BUFFER for adapter CONN.
 See `dape--callback' for expected CB signature."
-  (let* ((overlays (and (buffer-live-p buffer)
-                        (alist-get buffer
-                                   (seq-group-by 'overlay-buffer
-                                                 dape--breakpoints))))
-         (lines (mapcar (lambda (overlay)
-                          (with-current-buffer (overlay-buffer overlay)
-                            (line-number-at-pos (overlay-start overlay))))
-                        overlays))
-         (source (with-current-buffer buffer
-                   (or dape--source
-                       (list
-                        :name (file-name-nondirectory
-                               (buffer-file-name buffer))
-                        :path (dape--path (buffer-file-name buffer) 'remote))))))
+  (let* ((overlays
+          (alist-get buffer
+                     (seq-group-by 'overlay-buffer
+                                   dape--breakpoints)))
+         (lines
+          (mapcan (lambda (overlay)
+                    (when-let* ((buffer (overlay-buffer overlay))
+                                ((buffer-live-p buffer)))
+                      (with-current-buffer buffer
+                        (list
+                         (line-number-at-pos (overlay-start overlay))))))
+                  overlays))
+         (source
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (or dape--source
+                  (list
+                   :name (file-name-nondirectory
+                          (buffer-file-name buffer))
+                   :path (dape--path (buffer-file-name buffer) 'remote)))))))
     (dape--with dape-request
         (conn
          "setBreakpoints"
@@ -2672,7 +2680,9 @@ REVERSED selects previous."
 
 (defun dape--info-buffer-change-fn (&rest _rest)
   "Hook fn for `window-buffer-change-functions' to ensure update."
-  (dape--info-update (dape--live-connection 'newest t) (current-buffer)))
+  (dape--info-update (or (dape--live-connection 'stopped)
+                         (dape--live-connection 'newest t))
+                     (current-buffer)))
 
 (define-derived-mode dape-info-parent-mode special-mode ""
   "Generic mode to derive all other Dape gud buffer modes from."
