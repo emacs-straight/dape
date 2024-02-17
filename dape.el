@@ -175,6 +175,18 @@
      :cwd "."
      :program "lib/main.dart"
      :toolArgs ["-d" "all"])
+    ;; gdb is not fully functional with an thread count > 1
+    ;; See: `dape--info-threads-all-stack-trace-disable'
+    (gdb
+     modes (c-mode c-ts-mode c++-mode c++-ts-mode)
+     command-cwd dape-command-cwd
+     command "gdb"
+     command-args ("--interpreter=dap")
+     fn (dape-config-tramp)
+     :request "launch"
+     :program "a.out"
+     :args []
+     :stopAtBeginningOfMainSubprogram nil)
     (godot
      modes (gdscript-mode)
      port 6006
@@ -1348,7 +1360,8 @@ See `dape--callback' for expected CB signature."
   "Update stack trace in THREAD plist with NOF frames by adapter CONN.
 See `dape--callback' for expected CB signature."
   (let ((current-nof (length (plist-get thread :stackFrames)))
-        (delayed-stack-trace-p (dape--capable-p conn :supportsDelayedStackTraceLoading)))
+         (delayed-stack-trace-p
+          (dape--capable-p conn :supportsDelayedStackTraceLoading)))
     (cond
      ((or (not (equal (plist-get thread :status) "stopped"))
           (not (integerp (plist-get thread :id)))
@@ -1366,11 +1379,17 @@ See `dape--callback' for expected CB signature."
               :startFrame current-nof
               :levels (- nof current-nof))))
        (dape--callback
-        (plist-put thread :stackFrames
-                   (append
-                    (plist-get thread :stackFrames)
-                    (plist-get body :stackFrames)
-                    nil))
+        (cond
+         ((not delayed-stack-trace-p)
+          (plist-put thread :stackFrames
+                     (append (plist-get body :stackFrames) nil)))
+         ;; sanity check delayed stack trace
+         ((length= (plist-get thread :stackFrames) current-nof)
+          (plist-put thread :stackFrames
+                     (append
+                      (plist-get thread :stackFrames)
+                      (plist-get body :stackFrames)
+                      nil))))
         (funcall cb conn)))))))
 
 (defun dape--variables (conn object cb)
@@ -1482,18 +1501,6 @@ See `dape--callback' for expected CB signature."
                        (plist-put stack-frame :scopes scopes)
                        (funcall cb conn))))
     (funcall cb conn)))
-
-(defun dape--inactive-threads-stack-trace (conn cb)
-  "Populate CONN stack frame data for all threads.
-See `dape--callback' for expected CB signature."
-  (if (not (dape--threads conn))
-      (funcall cb conn)
-    (let ((responses 0))
-      (dolist (thread (dape--threads conn))
-        (dape--with dape--stack-trace (conn thread 1)
-          (setq responses (1+ responses))
-          (when (length= (dape--threads conn) responses)
-            (funcall cb conn)))))))
 
 (defun dape--update (conn
                      &optional skip-clear-stack-frames skip-stack-pointer-flash)
@@ -2824,10 +2831,11 @@ If SKIP-UPDATE is non nil skip updating buffer contents."
 (defun dape-info-update (&optional conn)
   "Update and display `dape-info-*' buffers for adapter CONN."
   (dolist (buffer (dape--info-buffer-list))
-    (dape--info-update (or conn
-                           (dape--live-connection 'stopped t)
-                           (dape--live-connection 'newest t))
-                       buffer)))
+    (when (get-buffer-window buffer)
+      (dape--info-update (or conn
+                             (dape--live-connection 'stopped t)
+                             (dape--live-connection 'newest t))
+                         buffer))))
 
 (defun dape-info (&optional maybe-kill kill)
   "Update and display *dape-info* buffers.
@@ -3012,6 +3020,26 @@ When optional kill is non nil kill buffers *dape-info* buffers."
   ;; TODO Add bindings for individual threads.
   )
 
+;; TODO Report gdb bug
+(defvar dape--info-threads-all-stack-trace-disable nil
+  "Disable stack information for non selected threads.
+GDB fails fetching stack variables if an stack trace for another
+thread is in flight, which happens when *dape-info Threads* and
+*dape-info Scopes* are updated at the same time.")
+
+(defun dape--info-threads-all-stack-trace (conn cb)
+  "Populate CONN stack frame data for non selected threads.
+See `dape--callback' for expected CB signature."
+  (if (or dape--info-threads-all-stack-trace-disable
+          (not (dape--threads conn)))
+      (funcall cb conn)
+    (let ((responses 0))
+      (dolist (thread (dape--threads conn))
+        (dape--with dape--stack-trace (conn thread 1)
+          (setq responses (1+ responses))
+          (when (length= (dape--threads conn) responses)
+            (funcall cb conn)))))))
+
 (define-derived-mode dape-info-threads-mode dape-info-parent-mode "Threads"
   "Major mode for Dape info threads."
   :interactive nil
@@ -3026,7 +3054,7 @@ Buffer is specified by MODE and ID."
   (if-let ((conn (or conn (dape--live-connection 'newest t)))
            ((dape--stopped-threads conn))
            (threads (dape--threads conn)))
-      (dape--with dape--inactive-threads-stack-trace (conn)
+      (dape--with dape--info-threads-all-stack-trace (conn)
         (dape--info-update-with mode id
           (let ((table (make-gdb-table))
                 (current-thread (dape--current-thread conn)))
@@ -3515,8 +3543,9 @@ Buffer is specified by MODE and ID."
                         (gethash (cons (plist-get object :name) path)
                                  dape--info-expanded-p))))
               (dape--info-update-with mode id
-                (setq dape--info-buffer-related
-                      (dape--info-group-2-related-buffers scopes))
+                (when scopes
+                  (setq dape--info-buffer-related
+                        (dape--info-group-2-related-buffers scopes)))
                 (cl-loop with table = (make-gdb-table)
                          for watch in dape--watched
                          initially (setf (gdb-table-right-align table)
@@ -4306,8 +4335,8 @@ See `eldoc-documentation-functions', for more infomation."
     (define-key map "B" #'dape-breakpoint-remove-all)
     (define-key map "t" #'dape-select-thread)
     (define-key map "S" #'dape-select-stack)
-    (define-key map (kbd "C-i") #'dape-stack-select-down)
-    (define-key map (kbd "C-o") #'dape-stack-select-up)
+    (define-key map ">" #'dape-stack-select-down)
+    (define-key map "<" #'dape-stack-select-up)
     (define-key map "x" #'dape-evaluate-expression)
     (define-key map "w" #'dape-watch-dwim)
     (define-key map "D" #'dape-disconnect-quit)
