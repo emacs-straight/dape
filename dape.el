@@ -51,6 +51,7 @@
 (require 'tree-widget)
 (require 'project)
 (require 'gdb-mi)
+(require 'hexl)
 (require 'tramp)
 (require 'jsonrpc)
 (require 'eglot) ;; jdtls config
@@ -453,7 +454,7 @@ present in an group."
   "Hook to run on session start."
   :type 'hook)
 
-(defcustom dape-on-stopped-hooks '(dape--emacs-grab-focus)
+(defcustom dape-on-stopped-hooks '(dape--emacs-grab-focus dape-memory-revert)
   "Hook to run on session stopped."
   :type 'hook)
 
@@ -461,8 +462,12 @@ present in an group."
   "Hook to run on ui update."
   :type 'hook)
 
-(defcustom dape-read-memory-default-count 1024
-  "The default count for `dape-read-memory'."
+(define-obsolete-variable-alias
+  'dape-read-memory-default-count
+  'dape-read-memory-bytes "0.8.0")
+
+(defcustom dape-read-memory-bytes 1024
+  "The bytes read with `dape-read-memory'."
   :type 'natnum)
 
 (defcustom dape-info-hide-mode-line
@@ -504,7 +509,7 @@ left-to-right display order of the properties."
   "Show file information or library names in stack buffer."
   :type 'boolean)
 
-(defcustom dape-info-stack-buffer-modules t
+(defcustom dape-info-stack-buffer-modules nil
   "Show module information in stack buffer if adapter supports it."
   :type 'boolean)
 
@@ -1549,18 +1554,19 @@ See `dape-request' for expected CB signature."
         (dape--request-return cb error))
     (dape--request-return cb)))
 
-(defun dape--update (conn
-                     &optional skip-clear-stack-frames skip-stack-pointer-flash)
+(defun dape--update (conn &optional skip-clear-stack-frames
+                          skip-stack-pointer-flash skip-display)
   "Update adapter CONN data and ui.
 If SKIP-CLEAR-STACK-FRAMES no stack frame data is cleared.  This
 is usefully if only to load data for another thread.
-If SKIP-STACK-POINTER-FLASH skip flashing after placing stack pointer."
+If SKIP-STACK-POINTER-FLASH skip flashing after placing stack pointer.
+If SKIP-DISPLAY is non nil refrain from displaying selected stack."
   (let ((current-thread (dape--current-thread conn)))
     (unless skip-clear-stack-frames
       (dolist (thread (dape--threads conn))
         (plist-put thread :stackFrames nil)))
     (dape--with-request (dape--stack-trace conn current-thread 1)
-      (dape--update-stack-pointers conn skip-stack-pointer-flash)
+      (dape--update-stack-pointers conn skip-stack-pointer-flash skip-display)
       (dape--with-request (dape--scopes conn (dape--current-stack-frame conn))
         (run-hooks 'dape-update-ui-hooks)))))
 
@@ -2299,38 +2305,165 @@ Using BUFFER and STR."
 
 ;;; Memory viewer
 
-(defun dape--address-to-number (address)
-  "Convert string ADDRESS to number."
-  (if (string-match "\\`0x\\([[:alnum:]]+\\)" address)
-      (string-to-number (match-string 1 address) 16)
-    (string-to-number address)))
+(defvar-local dape--memory-offset nil
+  "Buffer local var to keep track of current offset/address.")
 
-(defun dape-read-memory (memory-reference count)
-  "Read COUNT bytes of memory at MEMORY-REFERENCE."
+(defun dape--memory-print-current-point-info (&rest _ignored)
+  "Print address at point."
+  (let ((addr (+ (hexl-current-address) (dape--memory-offset-number))))
+    (format "Current address is %d/0x%08x" addr addr)))
+
+(defun dape--memory-offset-number ()
+  "Return `dape--memory-offset' as an number."
+  (thread-first dape--memory-offset (substring 2) (string-to-number 16)))
+
+(defun dape--memory-revert (&optional _ignore-auto _noconfirm _preserve-modes)
+  "Revert buffer function for `dape-memory-mode'."
+  (let* ((conn (dape--live-connection 'last))
+         (write-capable-p (dape--capable-p conn :supportsWriteMemoryRequest)))
+    (unless (dape--capable-p conn :supportsReadMemoryRequest)
+      (user-error "Adapter not capable of reading memory."))
+    (unless dape--memory-offset
+      (user-error "`dape--memory-offset' not set."))
+    (cl-labels ((button-fn (fn) (lambda (_) (call-interactively fn))))
+      (setq header-line-format
+            (mapconcat
+             'identity
+             `("Offset:"
+               ,(buttonize dape--memory-offset
+                           (button-fn #'dape-memory-set-offset))
+               "Bytes:"
+               ,(buttonize (format "%s" dape-read-memory-bytes)
+                           (lambda (_)
+                             (setopt dape-read-memory-bytes
+                                     (read-number "Set bytes: " dape-read-memory-bytes))
+                             (revert-buffer)))
+               ,(buttonize "Backward" (button-fn #'dape-memory-backward))
+               ,(buttonize "Forward" (button-fn #'dape-memory-forward))
+               ,@(when write-capable-p
+                   (list (substitute-command-keys
+                          "write memory `\\[save-buffer]'"))))
+             " ")))
+    (dape--with-request-bind
+        ((&key address data &allow-other-keys) error)
+        (dape-request conn "readMemory"
+                      (list :memoryReference dape--memory-offset
+                            :count dape-read-memory-bytes))
+      (cond
+       (error (message "Failed to read memory: %s" error))
+       ((not data) (message "No bytes returned from adapter"))
+       (t
+        (let ((inhibit-read-only t))
+          (setq dape--memory-offset address
+                buffer-undo-list nil)
+          (save-excursion
+            (erase-buffer)
+            (insert (base64-decode-string data))
+            (let (buffer-undo-list)
+              (hexlify-buffer))
+            ;; Now we need to translate the address fields after the
+            ;; fact ugghh
+            (goto-char (point-min))
+            (let ((offset (dape--memory-offset-number)))
+              (while (re-search-forward "^[0-9a-f]+" nil t)
+                (let ((address
+                       (format "%08x" (+ offset
+                                         (string-to-number (match-string 0) 16)))))
+                  (delete-region (match-beginning 0) (match-end 0))
+                  ;; `hexl' does not support address over 8 hex chars
+                  (insert (append (substring address (- (length address) 8)))))))))
+        (set-buffer-modified-p nil)
+        (when write-capable-p
+	  (add-hook 'write-contents-functions #'dape--memory-write))
+        (rename-buffer (format "*dape-memory @ %s*" address) t))))))
+
+(defun dape--memory-write ()
+  "Write buffer contents to stopped connection."
+  (let ((conn (dape--live-connection 'last))
+        (buffer (current-buffer))
+        (start (point-min))
+        (end (point-max))
+        (offset dape--memory-offset))
+    (with-temp-buffer
+      (insert-buffer-substring buffer start end)
+      (dehexlify-buffer)
+      (dape--with-request-bind
+          (_body error)
+          (dape-request conn "writeMemory"
+                        (list :memoryReference offset
+                              :data (base64-encode-string (buffer-string) t)))
+        (if error
+            (message "Failed to write memory: %s" error)
+          (with-current-buffer buffer
+            (set-buffer-modified-p nil))
+          (message "Memory written successfully at %s" offset)
+          (dape--update conn nil t t)))))
+  ;; Return `t' to signal buffer written
+  t)
+
+(define-derived-mode dape-memory-mode hexl-mode "Memory"
+  "Mode for reading and writing memory."
+  :interactive nil
+  ;; TODO Replace or improve hexl.
+  ;;      hexl is not really fitted for our use case as it does
+  ;;      support offsets in any way.  The buffer is created with the
+  ;;      hexl binary as is.  Filling the buffer with junk before
+  ;;      `hexlify-buffer' is not an option as it might be extremely
+  ;;      large.
+  (add-hook 'eldoc-documentation-functions
+            #'dape--memory-print-current-point-info nil t)
+  ;; FIXME Is `revert-buffer-in-progress-p' is not respected
+  ;;       as most of the work is done in an callback.
+  (setq revert-buffer-function #'dape--memory-revert))
+
+(define-key dape-memory-mode-map [remap hexl-goto-address] #'dape-memory-set-offset)
+(define-key dape-memory-mode-map [remap hexl-goto-hex-address] #'dape-memory-set-offset)
+
+(defun dape-memory-set-offset (offset)
+  "Set memory OFFSET."
+  (interactive (list (read-string "Set offset: " dape--memory-offset)))
+  (setq dape--memory-offset offset)
+  (revert-buffer))
+
+(defun dape-memory-forward (&optional backward)
+  "Move offset half `dape-read-memory-bytes' forward.
+When BACKWARD is non nil move backward instead."
+  (interactive nil dape-memory-mode)
+  (let ((op (if backward '- '+)))
+    (dape-memory-set-offset
+     (format "0x%08x"
+             (funcall op (dape--memory-offset-number)
+                      (thread-first dape-read-memory-bytes (/ 2) (floor)))))))
+
+(defun dape-memory-backward ()
+  "Move offset half `dape-read-memory-bytes' backward."
+  (interactive nil dape-memory-mode)
+  (dape-memory-forward 'backward))
+
+(defun dape-memory-revert ()
+  "Revert all `dape-memory-mode' buffers."
+  (cl-loop for buffer in (buffer-list)
+           when (eq (with-current-buffer buffer major-mode)
+                    'dape-memory-mode)
+           do (with-current-buffer buffer (revert-buffer))))
+
+(defun dape-read-memory (offset)
+  "Read `dape-read-memory-bytes' bytes of memory at MEMORY-REFERENCE."
   (interactive
    (list (string-trim
-          (read-string "Read memory reference: "
+          (read-string "Offset: "
                        (when-let ((number (thing-at-point 'number)))
-                         (number-to-string number))))
-         (read-number "Count: " dape-read-memory-default-count)))
-  (dape--with-request-bind
-      ((&key address data &allow-other-keys) _error)
-      (dape-request (dape--live-connection 'stopped) "readMemory"
-                    (list :memoryReference memory-reference :count count))
-    (when (and address data)
-      (setq address (dape--address-to-number address)
-            data (base64-decode-string data))
-      (let ((buffer
-             (generate-new-buffer (format "*dape-memory @ %s*"
-                                          memory-reference))))
-        (with-current-buffer buffer
-          (insert data)
-          (let (buffer-undo-list)
-            (hexl-mode))
-          ;; TODO Add hook with a writeMemory request
-          )
-        (pop-to-buffer buffer)))))
-
+                         (format "0x%08x" number))))))
+  (let ((conn (dape--live-connection 'stopped)))
+    (unless (dape--capable-p conn :supportsReadMemoryRequest)
+      (user-error "Adapter not capable of reading memory."))
+    (let ((buffer
+           (generate-new-buffer (format "*dape-memory @ %s*" offset))))
+      (with-current-buffer buffer
+        (dape-memory-mode)
+        (setq dape--memory-offset offset)
+        (revert-buffer))
+      (display-buffer buffer))))
 
 ;;; Breakpoints
 
@@ -2760,6 +2893,9 @@ REVERSED selects previous."
   (setq-local buffer-read-only t
               truncate-lines t
               cursor-in-non-selected-windows nil
+              ;; FIXME Is `revert-buffer-in-progress-p' is not
+              ;;       respected as most of the work is done in an
+              ;;       callback.
               revert-buffer-function #'dape--info-revert)
   (add-hook 'window-buffer-change-functions 'dape--info-buffer-change-fn
             nil 'local)
@@ -4328,7 +4464,7 @@ See `eldoc-documentation-functions', for more infomation."
   "Format Dape mode line."
   (let ((conn (or (dape--live-connection 'last t)
                   dape--connection)))
-    (concat (propertize "Dape" 'face 'font-lock-constant-face)
+    (concat (propertize "dape" 'face 'font-lock-constant-face)
             ":"
             (propertize
              (format "%s" (or (and conn (dape--state conn))
@@ -4342,14 +4478,16 @@ See `eldoc-documentation-functions', for more infomation."
 
 ;;; Savehist mode
 
+(defvar savehist-additional-variables) ;; skip savehist require
+
 (defvar dape--breakpoints-savehist nil
   "Used to save and load `dape--breakpoints' in an printable format.")
 
 (defun dape-savehist-load ()
   "Load breakpoints and exceptions saved by `savehist-mode'."
   (when (and dape-use-savehist (not dape--breakpoints))
-    (add-to-list 'savehist-additional-variables #'dape--breakpoints-savehist)
-    (add-to-list 'savehist-additional-variables #'dape--exceptions)
+    (add-to-list 'savehist-additional-variables 'dape--breakpoints-savehist)
+    (add-to-list 'savehist-additional-variables 'dape--exceptions)
     (cl-loop for (file point . args) in dape--breakpoints-savehist
              do (ignore-errors
                   (with-current-buffer (find-file-noselect file)
