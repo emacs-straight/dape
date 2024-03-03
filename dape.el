@@ -176,8 +176,6 @@
      :cwd "."
      :program "lib/main.dart"
      :toolArgs ["-d" "all"])
-    ;; gdb is not fully functional with an thread count > 1
-    ;; See: `dape--info-threads-all-stack-trace-disable'
     (gdb
      modes (c-mode c-ts-mode c++-mode c++-ts-mode)
      command-cwd dape-command-cwd
@@ -200,7 +198,6 @@
                          (dape-ensure-command config)
                          (let ((js-debug-file
                                 (file-name-concat
-                                 (dape--config-eval-value (plist-get config 'command-cwd))
                                  (dape--config-eval-value (car (plist-get config 'command-args))))))
                            (unless (file-exists-p js-debug-file)
                              (user-error "File %S does not exist" js-debug-file))))
@@ -336,21 +333,22 @@
      :vmArgs " -XX:+ShowCodeDetailsInExceptionMessages"
      :console "integratedConsole"
      :internalConsoleOptions "neverOpen"))
-   "This variable holds the Dape configurations as an alist.
+   "This variable holds the dape configurations as an alist.
 In this alist, the car element serves as a symbol identifying each
 configuration.  Each configuration, in turn, is a property list (plist)
 where keys can be symbols or keywords.
 
-Symbol Keys (Used by Dape):
+Symbol Keys (Used by dape):
 - fn: Function or list of functions, takes config and returns config.
   If list functions are applied in order.  Used for hiding unnecessary
   configuration details from config history.
 - ensure: Function to ensure that adapter is available.
 - command: Shell command to initiate the debug adapter.
 - command-args: List of string arguments for the command.
-- command-cwd: Working directory for the command.
-- prefix-local: Defines the source path prefix, accessible from Emacs.
-- prefix-remote: Defines the source path prefix, accessible by the adapter.
+- command-cwd: Working directory for the command, if not supplied
+  `default-directory' will be used.
+- prefix-local: Path prefix for Emacs file access.
+- prefix-remote: Path prefix for debugger file access.
 - host: Host of the debug adapter.
 - port: Port of the debug adapter.
 - modes: List of modes where the configuration is active in `dape'
@@ -384,8 +382,8 @@ Functions and symbols in configuration:
                          ((const :tag "Shell command to initiate the debug adapter" command) (choice string symbol))
                          ((const :tag "List of string arguments for command" command-args) (repeat string))
                          ((const :tag "Working directory for command" command-cwd) (choice string symbol))
-                         ((const :tag "Path prefix for local src paths" prefix-local) string)
-                         ((const :tag "Path prefix for remote src paths" prefix-remote) string)
+                         ((const :tag "Path prefix for Emacs file access" prefix-local) string)
+                         ((const :tag "Path prefix for debugger file access" prefix-remote) string)
                          ((const :tag "Host of debug adapter" host) string)
                          ((const :tag "Port of debug adapter" port) natnum)
                          ((const :tag "Compile cmd" compile) string)
@@ -727,18 +725,21 @@ Run step like COMMAND on CONN.  If ARG is set run COMMAND ARG times."
                    (eq (plist-get thread :id) (dape--thread-id conn)))
                  (dape--threads conn))))
 
-(defun dape--path (path format)
-  "Translate PATH to FORMAT from config.
-Accepted FORMAT values is `local' and `remote'.
-See `dape-config' keywords `prefix-local' `prefix-remote'."
-  (if-let* (dape--connection
-            (config (dape--config dape--connection))
+(defun dape--path (conn path format)
+  "Return translate absolute PATH in FORMAT from CONN config.
+Accepted FORMAT values are local and remote.
+See `dape-configs' symbols prefix-local prefix-remote."
+  (if-let* ((config (dape--config conn))
+            (path (expand-file-name
+                   path
+                   (let ((command-cwd (plist-get config 'command-cwd)))
+                     (pcase format
+                       ('local (tramp-file-local-name command-cwd))
+                       ('remote command-cwd)))))
             ((or (plist-member config 'prefix-local)
                  (plist-member config 'prefix-remote)))
-            (prefix-local (or (plist-get config 'prefix-local)
-                              ""))
-            (prefix-remote (or (plist-get config 'prefix-remote)
-                               ""))
+            (prefix-local (or (plist-get config 'prefix-local) ""))
+            (prefix-remote (or (plist-get config 'prefix-remote) ""))
             (mapping (pcase format
                        ('local (cons prefix-remote prefix-local))
                        ('remote (cons prefix-local prefix-remote))
@@ -772,8 +773,9 @@ See `dape-config' keywords `prefix-local' `prefix-remote'."
         (car stack-frames-with-source)
         (car stack-frames))))
 
-(defun dape--object-to-marker (plist)
-  "Create marker from dap PLIST containing source information.
+(defun dape--object-to-marker (conn plist)
+  "Return marker created from PLIST and CONN config.
+Marker is created from PLIST keys :source and :line.
 Note requires `dape--source-ensure' if source is by reference."
   (when-let ((source (plist-get plist :source))
              (line (or (plist-get plist :line) 1))
@@ -785,7 +787,7 @@ Note requires `dape--source-ensure' if source is by reference."
                               ((buffer-live-p buffer)))
                     buffer)
                   (when-let* ((path (plist-get source :path))
-                              (path (dape--path path 'local))
+                              (path (dape--path conn path 'local))
                               ((file-exists-p path))
                               (buffer (find-file-noselect path t)))
                     buffer))))
@@ -818,18 +820,11 @@ Note requires `dape--source-ensure' if source is by reference."
    (file-relative-name (buffer-file-name) (dape-command-cwd))))
 
 (defun dape--guess-root (config)
-  "Guess adapter path root from CONFIG."
-  ;; FIXME We need some property on the adapter telling us how it
-  ;;       decided on root
-  ;; FIXME Is this function meant to return root emacs world (with tramp)
-  ;;       or adapter world w/o tramp?
-  (let ((cwd (plist-get config :cwd))
-        (command-cwd (plist-get config 'command-cwd)))
-    (cond
-     ((and cwd (stringp cwd) (file-name-absolute-p cwd))
-      cwd)
-     ((stringp command-cwd) command-cwd)
-     (t default-directory))))
+  "Return best guess root path from CONFIG."
+  (if-let* ((command-cwd (plist-get config 'command-cwd))
+            ((stringp command-cwd)))
+      command-cwd
+    (dape-command-cwd)))
 
 (defun dape-config-autoport (config)
   "Replace :autoport in CONFIG keys `command-args' and `port'.
@@ -838,7 +833,7 @@ with value of `port' instead.
 Replaces symbol and string occurences of \"autoport\"."
   ;; Stolen from `Eglot'
   (let ((port (plist-get config 'port)))
-    (when (eq (plist-get config 'port) :autoport)
+    (when (eq port :autoport)
       (let ((port-probe (make-network-process :name "dape-port-probe-dummy"
                                               :server t
                                               :host "localhost"
@@ -862,6 +857,8 @@ Replaces symbol and string occurences of \"autoport\"."
 
 (defun dape-config-tramp (config)
   "Infer `prefix-local' and `host' on CONFIG if in tramp context."
+  ;; TODO maybe this should be moved out of configs and into
+  ;;      `dape--config-eval'
   (when-let* ((default-directory
                (or (plist-get config 'command-cwd)
                    default-directory))
@@ -1293,7 +1290,7 @@ See `dape-request' for expected CB signature."
               (or dape--source
                   (list
                    :name (file-name-nondirectory (buffer-file-name buffer))
-                   :path (dape--path (buffer-file-name buffer) 'remote)))))))
+                   :path (dape--path conn (buffer-file-name buffer) 'remote)))))))
     (dape--with-request-bind
         ((&key breakpoints &allow-other-keys) error)
         (dape-request conn
@@ -1576,11 +1573,13 @@ If SKIP-DISPLAY is non nil refrain from displaying selected stack."
 (cl-defgeneric dape-handle-request (_conn _command _arguments)
   "Sink for all unsupported requests." nil)
 
-(cl-defmethod dape-handle-request (_conn (_command (eql runInTerminal)) arguments)
+(cl-defmethod dape-handle-request (conn (_command (eql runInTerminal)) arguments)
   "Handle runInTerminal requests.
 Starts a new adapter CONNs from ARGUMENTS."
-  (let ((default-directory (or (plist-get arguments :cwd)
-                               default-directory))
+  (let ((default-directory
+         (or (when-let ((cwd (plist-get arguments :cwd)))
+               (dape--path conn cwd 'local))
+             default-directory))
         (process-environment
          (or (cl-loop for (key value) on (plist-get arguments :env) by 'cddr
                       collect
@@ -1588,21 +1587,19 @@ Starts a new adapter CONNs from ARGUMENTS."
                               (substring (format "%s" key) 1)
                               value))
              process-environment))
-        (buffer (get-buffer-create "*dape-shell*"))
-        (display-buffer-alist
-         '(((major-mode . shell-mode) . (display-buffer-no-window)))))
-    (async-shell-command (string-join
-                          (cl-map 'list
-                                  'identity
-                                  (plist-get arguments :args))
-                          " ")
-                         buffer
-                         buffer)
-    ;; FIXME `display-buffer-alist' should not be set here as it does
-    ;;       not allow for user to change display behaviour for
-    ;;       *dape-shell*
-    (dape--display-buffer buffer)
-    (list :processId (process-id (get-buffer-process buffer)))))
+        (buffer (get-buffer-create "*dape-shell*")))
+    (with-current-buffer buffer
+      (shell-mode)
+      (shell-command-save-pos-or-erase))
+    (let ((process
+           (make-process :name "dape shell"
+                         :buffer buffer
+                         :command (append (plist-get arguments :args) nil)
+                         :filter 'comint-output-filter
+                         :sentinel 'shell-command-sentinel
+                         :file-handler t)))
+      (dape--display-buffer buffer)
+      (list :processId (process-id process)))))
 
 (cl-defmethod dape-handle-request (conn (_command (eql startDebugging)) arguments)
   "Handle adapter CONNs startDebugging requests with ARGUMENTS.
@@ -2301,6 +2298,8 @@ Using BUFFER and STR."
   (let ((default-directory (dape--guess-root config))
         (command (plist-get config 'compile)))
     (setq dape--compile-config config)
+    ;; FIXME: Kill current compilation before adding hook otherwise we
+    ;;        we might call `dape' on old compilation.
     (add-hook 'compilation-finish-functions
               #'dape--compile-compilation-finish)
     (funcall dape-compile-fn command)))
@@ -2672,11 +2671,11 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
                        ;; Default to current overlay as `:source'
                        `(:source
                          ,(or (when-let ((path (buffer-file-name old-buffer)))
-                                `(:path ,(dape--path path 'remote)))
+                                `(:path ,(dape--path conn path 'remote)))
                               (with-current-buffer old-buffer
                                 dape--source))))))
     (dape--with-request (dape--source-ensure conn breakpoint)
-      (when-let* ((marker (dape--object-to-marker breakpoint))
+      (when-let* ((marker (dape--object-to-marker conn breakpoint))
                   (new-buffer (marker-buffer marker))
                   (new-line (plist-get breakpoint :line)))
         (unless (and (= old-line new-line)
@@ -2711,7 +2710,8 @@ See `dape-request' for expected CB signature."
          (buffer (plist-get dape--source-buffers source-reference)))
     (cond
      ((or (not conn)
-          (and path (file-exists-p (dape--path path 'local)))
+          (not (jsonrpc-running-p conn))
+          (and path (file-exists-p (dape--path conn path 'local)))
           (and buffer (buffer-live-p buffer)))
       (dape--request-return cb))
      ((and (numberp source-reference) (> source-reference 0))
@@ -2773,7 +2773,7 @@ If SKIP-DISPLAY is non nil refrain from going to selected stack."
     (let ((deepest-p (eq frame (car (plist-get (dape--current-thread conn)
                                                :stackFrames)))))
       (dape--with-request (dape--source-ensure conn frame)
-        (when-let ((marker (dape--object-to-marker frame)))
+        (when-let ((marker (dape--object-to-marker conn frame)))
           (unless skip-display
             (when-let ((window
                         (display-buffer (marker-buffer marker)
@@ -3207,18 +3207,10 @@ displayed."
   ;; TODO Add bindings for individual threads.
   )
 
-;; TODO Report gdb bug
-(defvar dape--info-threads-all-stack-trace-disable nil
-  "Disable stack information for non selected threads.
-GDB fails fetching stack variables if an stack trace for another
-thread is in flight, which happens when *dape-info Threads* and
-*dape-info Scopes* are updated at the same time.")
-
 (defun dape--info-threads-all-stack-trace (conn cb)
   "Populate CONN stack frame data for non selected threads.
 See `dape-request' for expected CB signature."
-  (if (or dape--info-threads-all-stack-trace-disable
-          (not (dape--threads conn)))
+  (if (not (dape--threads conn))
       (dape--request-return cb)
     (let ((responses 0))
       (dolist (thread (dape--threads conn))
@@ -3267,7 +3259,7 @@ See `dape-request' for expected CB signature."
                                   (path (thread-first top-stack
                                                       (plist-get :source)
                                                       (plist-get :path)))
-                                  (path (dape--path path 'local))
+                                  (path (dape--path conn path 'local))
                                   (line (plist-get top-stack :line)))
                         (concat " of " (dape--format-file-line path line)))
                       (when-let ((dape-info-thread-buffer-addresses)
@@ -3314,10 +3306,10 @@ See `dape-request' for expected CB signature."
         dape--info-stack-position (make-marker))
   (add-to-list 'overlay-arrow-variable-list 'dape--info-stack-position))
 
-(defun dape--info-stack-buffer-insert (current-stack-frame stack-frames)
+(defun dape--info-stack-buffer-insert (conn current-stack-frame stack-frames)
   "Helper for inserting stack info into *dape-info Stack* buffer.
 Create table from CURRENT-STACK-FRAME and STACK-FRAMES and insert into
-current buffer."
+current buffer with CONN config."
   (cl-loop with table = (make-gdb-table)
            for frame in stack-frames
            do
@@ -3331,7 +3323,7 @@ current buffer."
                           (path (thread-first frame
                                               (plist-get :source)
                                               (plist-get :path)))
-                          (path (dape--path path 'local)))
+                          (path (dape--path conn path 'local)))
                 (concat " of "
                         (dape--format-file-line path
                                                 (plist-get frame :line))))
@@ -3372,7 +3364,7 @@ current buffer."
 
       ;; Start off with shoving available stack info into buffer
       (dape--info-update-with
-        (dape--info-stack-buffer-insert current-stack-frame stack-frames))
+        (dape--info-stack-buffer-insert conn current-stack-frame stack-frames))
       (dape--with-request (dape--stack-trace conn
                                              current-thread
                                              dape-stack-trace-levels)
@@ -3380,7 +3372,7 @@ current buffer."
         ;; the stack frame list, we need to update the buffer again
         (unless (eq stack-frames (plist-get current-thread :stackFrames))
           (dape--info-update-with
-            (dape--info-stack-buffer-insert current-stack-frame
+            (dape--info-stack-buffer-insert conn current-stack-frame
                                             (plist-get current-thread :stackFrames)))))))))
 
 
@@ -3391,10 +3383,14 @@ current buffer."
   "Font lock keywords used in `gdb-frames-mode'.")
 
 (dape--command-at-line dape-info-modules-goto (dape--info-module)
-  "Goto source."
-  (if-let ((path (plist-get dape--info-module :path)))
-      (pop-to-buffer (find-file-noselect path))
-    (user-error "No path associated with module")))
+  "Goto module."
+  (let ((conn (dape--live-connection 'last t))
+        (source (list :source dape--info-module)))
+    (dape--with-request (dape--source-ensure conn source)
+      (if-let ((marker
+                (dape--object-to-marker conn source)))
+          (pop-to-buffer (marker-buffer marker))
+        (user-error "Unable to open module")))))
 
 (dape--buffer-map dape-info-module-line-map dape-info-modules-goto)
 
@@ -3440,12 +3436,13 @@ current buffer."
   "Goto source."
   ;; TODO Should be storing connection in `dape--info-source' instead of
   ;;      guessing
-  (dape--with-request (dape--source-ensure (dape--live-connection 'last t)
-                                           (list :source dape--info-source))
-    (if-let ((marker
-              (dape--object-to-marker (list :source dape--info-source))))
-        (pop-to-buffer (marker-buffer marker))
-      (user-error "Unable to get source"))))
+  (let ((conn (dape--live-connection 'last t))
+        (source (list :source dape--info-source)))
+    (dape--with-request (dape--source-ensure conn source)
+      (if-let ((marker
+                (dape--object-to-marker conn source)))
+          (pop-to-buffer (marker-buffer marker))
+        (user-error "Unable to get source")))))
 
 (dape--buffer-map dape-info-sources-line-map dape-info-sources-goto)
 
