@@ -107,13 +107,13 @@
            command-args ("--port" :autoport
                          "--settings" "{\"sourceLanguages\":[\"rust\"]}")
            ,@codelldb
-           :program ,(defun dape--rust-program ()
-                       (file-name-concat "target" "debug"
-                                         (thread-first (dape-cwd)
-                                                       (directory-file-name)
-                                                       (file-name-split)
-                                                       (last)
-                                                       (car))))
+           :program (lambda ()
+                      (file-name-concat "target" "debug"
+                                        (thread-first (dape-cwd)
+                                                      (directory-file-name)
+                                                      (file-name-split)
+                                                      (last)
+                                                      (car))))
            ,@common)))
     (cpptools
      modes (c-mode c-ts-mode c++-mode c++-ts-mode)
@@ -130,28 +130,38 @@
      :cwd "."
      :program "a.out"
      :MIMode ,(seq-find 'executable-find '("lldb" "gdb")))
-    (debugpy
-     modes (python-mode python-ts-mode)
-     ensure (lambda (config)
-              (dape-ensure-command config)
-              (let ((python
-                     (dape--config-eval-value (plist-get config 'command))))
-                (unless (zerop
-                         (call-process-shell-command
-                          (format "%s -c \"import debugpy.adapter\"" python)))
-                  (user-error "%s module debugpy is not installed" python))))
-     command "python"
-     command-args ("-m" "debugpy.adapter" "--host" "0.0.0.0" "--port" :autoport)
-     port :autoport
-     :request "launch"
-     :type "executable"
-     :cwd dape-cwd
-     :program dape-buffer-default
-     :args []
-     :justMyCode nil
-     :console "integratedTerminal"
-     :showReturnValue t
-     :stopAtEntry t)
+    ,@(let ((debugpy
+             `(modes (python-mode python-ts-mode)
+               ensure (lambda (config)
+                        (dape-ensure-command config)
+                        (let ((python (dape-config-get config 'command)))
+                          (unless (zerop
+                                   (call-process-shell-command
+                                    (format "%s -c \"import debugpy.adapter\"" python)))
+                            (user-error "%s module debugpy is not installed" python))))
+               command "python"
+               command-args ("-m" "debugpy.adapter" "--host" "0.0.0.0" "--port" :autoport)
+               port :autoport
+               :request "launch"
+               :type "python"
+               :cwd dape-cwd))
+            (common
+             `(:args []
+               :justMyCode nil
+               :console "integratedTerminal"
+               :showReturnValue t
+               :stopAtEntry t)))
+        `((debugpy ,@debugpy
+                   :program dape-buffer-default
+                   ,@common)
+          (debugpy-module ,@debugpy
+                          :module (lambda ()
+                                    (thread-first default-directory
+                                                  (directory-file-name)
+                                                  (file-name-split)
+                                                  (last)
+                                                  (car)))
+                          ,@common)))
     (dlv
      modes (go-mode go-ts-mode)
      ensure dape-ensure-command
@@ -192,11 +202,10 @@
              `(modes (js-mode js-ts-mode typescript-mode typescript-ts-mode)
                ensure ,(lambda (config)
                          (dape-ensure-command config)
-                         (let ((js-debug-file
-                                (file-name-concat
-                                 (dape--config-eval-value (car (plist-get config 'command-args))))))
-                           (unless (file-exists-p js-debug-file)
-                             (user-error "File %S does not exist" js-debug-file))))
+                         (let ((dap-debug-server-path
+                                (car (plist-get config 'command-args))))
+                           (unless (file-exists-p dap-debug-server-path)
+                             (user-error "File %S does not exist" dap-debug-server-path))))
                command "node"
                command-args (,(expand-file-name
                                (file-name-concat dape-adapter-dir
@@ -237,15 +246,15 @@
      command-args ["--interpreter=vscode"]
      :request "launch"
      :cwd dape-cwd
-     :program ,(defun dape--netcoredbg-program ()
-                 (let ((dlls
-                        (file-expand-wildcards
-                         (file-name-concat "bin" "Debug" "*" "*.dll"))))
-                   (if dlls
-                       (file-relative-name
-                        (file-relative-name (car dlls)))
-                     ".dll"
-                     (dape-cwd))))
+     :program (lambda ()
+                (let ((dlls
+                       (file-expand-wildcards
+                        (file-name-concat "bin" "Debug" "*" "*.dll"))))
+                  (if dlls
+                      (file-relative-name
+                       (file-relative-name (car dlls)))
+                    ".dll"
+                    (dape-cwd))))
      :stopAtEntry nil)
     (rdbg
      modes (ruby-mode ruby-ts-mode)
@@ -266,17 +275,14 @@
      ;; rails server
      ;; bundle exec ruby foo.rb
      ;; bundle exec rake test
-     -c ,(defun dape--rdbg-c ()
-           (format "ruby %s"
-                   (or (dape-buffer-default) ""))))
+     -c (lambda ()
+          (format "ruby %s"
+                  (or (dape-buffer-default) ""))))
     (jdtls
      modes (java-mode java-ts-mode)
      ensure (lambda (config)
-              (let ((file (thread-first (plist-get config :filePath)
-                                        (dape--config-eval-value))))
+              (let ((file (dape-config-get config :filePath)))
                 (unless (and (stringp file) (file-exists-p file))
-                  (thread-first (plist-get config :filePath)
-                                (dape--config-eval-value))
                   (user-error "Unable to find locate :filePath `%s'" file))
                 (with-current-buffer (find-file-noselect file)
                   (unless (eglot-current-server)
@@ -285,9 +291,8 @@
         			          "vscode.java.resolveClasspath")
         	    (user-error "jdtls instance does not bundle java-debug-server, please install")))))
      fn (lambda (config)
-          (with-current-buffer (thread-first (plist-get config :filePath)
-                                             (dape--config-eval-value)
-                                             (find-file-noselect))
+          (with-current-buffer
+              (find-file-noselect (dape-config-get config :filePath))
             (if-let ((server (eglot-current-server)))
 	        (pcase-let ((`[,module-paths ,class-paths]
 			     (eglot-execute-command server
@@ -303,21 +308,27 @@
               server)))
      ,@(cl-flet ((resolve-main-class (key)
                    (ignore-errors
-                     (pcase-let ((`[,main-class]
-                                  (eglot-execute-command
-                                   (eglot-current-server)
-				   "vscode.java.resolveMainClass"
-				   (file-name-nondirectory (directory-file-name (dape-cwd))))))
+                     (let* ((main-classes
+                             (eglot-execute-command (eglot-current-server)
+                                                    "vscode.java.resolveMainClass"
+                                                    (file-name-nondirectory
+                                                     (directory-file-name (dape-cwd)))))
+                            (main-class
+                             (or (seq-find (lambda(val)
+                                             (equal (plist-get val :filePath)
+                                                    (buffer-file-name)))
+                                           main-classes)
+                                 (aref main-classes 0))))
                        (plist-get main-class key)))))
          `(:filePath
-           ,(defun dape--jdtls-file-path ()
+           ,(lambda ()
               (or (resolve-main-class :filePath)
                   (expand-file-name (dape-buffer-default) (dape-cwd))))
            :mainClass
-           ,(defun dape--jdtls-main-class ()
+           ,(lambda ()
               (or (resolve-main-class :mainClass) ""))
            :projectName
-           ,(defun dape--jdtls-project-name ()
+           ,(lambda ()
               (or (resolve-main-class :projectName) ""))))
      :args ""
      :stopOnEntry nil
@@ -888,7 +899,7 @@ as is."
 (defun dape-ensure-command (config)
   "Ensure that `command' from CONFIG exist system."
   (let ((command
-         (dape--config-eval-value (plist-get config 'command))))
+         (dape-config-get config 'command)))
     (unless (or (file-executable-p command)
                 (executable-find command t))
       (user-error "Unable to locate %S with default-directory %s"
@@ -1763,12 +1774,10 @@ Sets `dape--thread-id' from BODY if not set."
 (cl-defmethod dape-handle-event (_conn (_event (eql output)) body)
   "Handle output events by printing BODY with `dape--repl-message'."
   (pcase (plist-get body :category)
-    ("stdout"
+    ((or "stdout" "console" "output")
      (dape--repl-message (plist-get body :output)))
     ("stderr"
-     (dape--repl-message (plist-get body :output) 'dape-repl-error-face))
-    ((or "console" "output")
-     (dape--repl-message (plist-get body :output)))))
+     (dape--repl-message (plist-get body :output) 'dape-repl-error-face))))
 
 (cl-defmethod dape-handle-event (conn (_event (eql exited)) body)
   "Handle adapter CONNs exited events.
@@ -4129,17 +4138,6 @@ Empty input will rerun last command.\n"
 (defvar dape--minibuffer-hint-overlay nil
   "Overlay for `dape--minibuffer-hint'.")
 
-(dolist (fn '(dape-cwd
-              dape-command-cwd
-              dape-buffer-default
-              dape--rust-program
-              dape--netcoredbg-program
-              dape--rdbg-c
-              dape--jdtls-file-path
-              dape--jdtls-main-class
-              dape--jdtls-project-name))
-  (put fn 'dape--minibuffer-hint t))
-
 (defun dape--minibuffer-hint (&rest _)
   "Display current configuration in minibuffer in overlay."
   (save-excursion
@@ -4190,14 +4188,17 @@ Empty input will rerun last command.\n"
                                 (propertize (format "%s" key)
                                             'face font-lock-keyword-face)
                                 " "
-                                (propertize
-                                 (format "%S"
-                                         (with-current-buffer dape--minibuffer-last-buffer
-                                           (condition-case _
-                                               (dape--config-eval-value value nil nil t)
-                                             (error 'error))))
-                                 'face (when (equal value (plist-get base-config key))
-                                         'shadow)))))
+                                (with-current-buffer dape--minibuffer-last-buffer
+                                  (condition-case err
+                                      (propertize
+                                       (format "%S"
+                                               (dape--config-eval-value value nil nil t))
+                                       'face
+                                       (when (equal value (plist-get base-config key))
+                                         'shadow))
+                                    (error
+                                     (propertize (error-message-string err)
+                                                 'face 'error)))))))
             dape--minibuffer-cache
             (list hint-key hint-config error-message hint-rows))
       (overlay-put dape--minibuffer-hint-overlay
@@ -4220,66 +4221,81 @@ Empty input will rerun last command.\n"
 
 ;;; Config
 
+(defun dape-config-get (config prop)
+  "Return PROP value in CONFIG evaluated."
+  (dape--config-eval-value (plist-get config prop)))
+
 (defun dape--plistp (object)
   "Non-nil if and only if OBJECT is a valid plist."
   (and-let* (((listp object))
              (len (length object))
              ((zerop (% len 2))))))
 
-(defun dape--config-eval-value (value &optional skip-function for-adapter for-hints)
-  "Evaluate dape config VALUE.
-If SKIP-FUNCTION and VALUE is an function it is not invoked.
-If FOR-ADAPTER current value is for the debug adapter.  Other rules
-apply.
-If FOR-HINTS handle function symbols as if they are going to be
-displayed as hints display."
-  (cond
-   ((functionp value)
-    (cond
-     (skip-function value)
-     (for-hints
-      (cond
-       ((and (symbolp value) (get value 'dape--minibuffer-hint))
-        (funcall value))
-       ((eq (car-safe value) 'lambda)
-        value)
-       (t value)))
-     (t (funcall-interactively value))))
-   ((dape--plistp value)
-    (dape--config-eval-1 value skip-function for-adapter for-hints))
-   ((vectorp value) (cl-map 'vector
-                            (lambda (value)
-                              (dape--config-eval-value value
-                                                       skip-function
-                                                       for-adapter
-                                                       for-hints))
-                            value))
-   ((and (symbolp value)
-         (not (eq (symbol-value value) value)))
-    (dape--config-eval-value (symbol-value value)
-                             skip-function for-adapter for-hints))
-   (t value)))
+(defun dape--config-eval-value (value &optional skip-functions check
+                                skip-interactive)
+  "Return recursively evaluated VALUE.
+If SKIP-FUNCTIONS is non nil return VALUE as is if `functionp' is non
+nil.
+If CHECK is non nil assert VALUE types, signal `user-error' on
+mismatch.
+If SKIP-INTERACTIVE is non nil return VALUE as is if `functionp' is
+non nil and function uses the minibuffer."
+  (pcase value
+    ;; On function
+    ((pred functionp)
+     (cond
+      (skip-functions value)
+      (skip-interactive
+       (condition-case _
+           (let ((enable-recursive-minibuffers nil))
+             (funcall-interactively value))
+         (error value)))
+      (t
+       (funcall-interactively value))))
+    ;; On plist recursively evaluate
+    ((pred dape--plistp)
+     (dape--config-eval-1 value skip-functions check skip-interactive))
+    ;; On vector evaluate each item
+    ((pred vectorp)
+     (cl-map 'vector
+             (lambda (value)
+               (dape--config-eval-value value
+                                        skip-functions
+                                        check
+                                        skip-interactive))
+             value))
+    ;; On symbol evaluate symbol value
+    ((and (pred symbolp)
+          ;; Guard against infinite recursion
+          (guard (not (eq (symbol-value value) value))))
+     (dape--config-eval-value (symbol-value value)
+                              skip-functions check skip-interactive))
+    ;; Otherwise return value
+    (_ value)))
 
-(defun dape--config-eval-1 (config &optional skip-functions for-adapter for-hints)
+(defun dape--config-eval-1 (config &optional skip-functions check
+                                   skip-interactive)
   "Helper for `dape--config-eval'."
   (cl-loop for (key value) on config by 'cddr
            append (cond
                    ((memql key '(modes fn ensure)) (list key value))
-                   ((and for-adapter (not (keywordp key)))
+                   ((and check (not (keywordp key)))
                     (user-error "Unexpected key %S; lists of things needs be \
 arrays [%S ...], if meant as an object replace (%S ...) with (:%s ...)"
                                 key key key key))
-                   (t (list key (dape--config-eval-value value
-                                                         skip-functions
-                                                         (or for-adapter
-                                                             (keywordp key))
-                                                         for-hints))))))
+                   (t
+                    (list key
+                          (dape--config-eval-value value
+                                                   skip-functions
+                                                   (or check (keywordp key))
+                                                   skip-interactive))))))
 
 (defun dape--config-eval (key options)
-  "Evaluate Dape config with KEY and OPTIONS."
+  "Evaluate config with KEY and OPTIONS."
   (let ((base-config (alist-get key dape-configs)))
     (unless base-config
-      (user-error "Unable to find `%s' in `dape-configs', available configurations: %s"
+      (user-error "Unable to find `%s' in `dape-configs', available \
+configurations: %s"
                   key (mapconcat (lambda (e) (symbol-name (car e)))
                                  dape-configs ", ")))
     (dape--config-eval-1 (seq-reduce (apply-partially 'apply 'plist-put)
@@ -4287,7 +4303,9 @@ arrays [%S ...], if meant as an object replace (%S ...) with (:%s ...)"
                                      (copy-tree base-config)))))
 
 (defun dape--config-from-string (str &optional loose-parsing)
-  "Parse list of name and config from STR.
+  "Return list of ALIST-KEY CONFIG from STR.
+Expects STR format of \”ALIST-KEY PLIST-KEY PLIST-VALUE\” etc.
+Where ALIST-KEY exists in `dape-configs'.
 If LOOSE-PARSING is non nil ignore arg parsing failures."
   (let ((buffer (current-buffer))
         name read-config base-config)
@@ -4305,8 +4323,12 @@ If LOOSE-PARSING is non nil ignore arg parsing failures."
         (user-error "No configuration named `%s'" name))
       (setq base-config (copy-tree (alist-get name dape-configs)))
       (condition-case _
-          ;; FIXME ugly
-          (while (not (string-empty-p (string-trim (buffer-substring (point) (point-max)))))
+          (while
+              ;; Do we have non whitespace chars after `point'?
+              (thread-first (buffer-substring (point) (point-max))
+                            (string-trim)
+                            (string-empty-p)
+                            (not))
             (push (read (current-buffer))
                   read-config))
         (error
@@ -4331,9 +4353,10 @@ If LOOSE-PARSING is non nil ignore arg parsing failures."
                         (and
                          ;; Does the key exist in `base-config'?
                          (plist-member base-config key)
-                         ;; Has value changed?
-                         (equal (dape--config-eval-value (plist-get base-config key)
-                                                         t)
+                         ;; Has value changed (skip functions)?
+                         (equal (dape--config-eval-value
+                                 (plist-get base-config key)
+                                 'skip-functions)
                                 value)))
              append (list key value))))
 
@@ -4341,15 +4364,15 @@ If LOOSE-PARSING is non nil ignore arg parsing failures."
   "Create string from KEY and POST-EVAL-CONFIG."
   (let ((config-diff (dape--config-diff key post-eval-config)))
     (concat (when key (format "%s" key))
-            (and-let* ((config-diff) (config-str (prin1-to-string config-diff)))
+            (and-let* ((config-diff)
+                       (config-str (prin1-to-string config-diff)))
               (format " %s"
-                      (substring config-str
-                                 1
-                                 (1- (length config-str))))))))
+                      (substring config-str 1 (1- (length config-str))))))))
 
 (defun dape--config-ensure (config &optional signal)
-  "Ensure that CONFIG is valid executable.
-If SIGNAL is non nil raises an `user-error'."
+  "Ensure that CONFIG is executable.
+If SIGNAL is non nil raises `user-error' on failure otherwise returns
+nil."
   (if-let ((ensure-fn (plist-get config 'ensure)))
       (let ((default-directory
              (or (when-let ((command-cwd (plist-get config 'command-cwd)))
