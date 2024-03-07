@@ -140,8 +140,7 @@
                                     (format "%s -c \"import debugpy.adapter\"" python)))
                             (user-error "%s module debugpy is not installed" python))))
                command "python"
-               command-args ("-m" "debugpy.adapter" "--host" "0.0.0.0" "--port" :autoport)
-               port :autoport
+               command-args ("-m" "debugpy.adapter")
                :request "launch"
                :type "python"
                :cwd dape-cwd))
@@ -342,10 +341,10 @@ In this alist, the car element serves as a symbol identifying each
 configuration.  Each configuration, in turn, is a property list (plist)
 where keys can be symbols or keywords.
 
-Symbol Keys (Used by dape):
+Symbol keys (Used by dape):
 - fn: Function or list of functions, takes config and returns config.
-  If list functions are applied in order.  Used for hiding unnecessary
-  configuration details from config history.
+  If list functions are applied in order.
+  See `dape-default-config-functions'.
 - ensure: Function to ensure that adapter is available.
 - command: Shell command to initiate the debug adapter.
 - command-args: List of string arguments for the command.
@@ -359,24 +358,23 @@ Symbol Keys (Used by dape):
   completions.
 - compile: Executes a shell command with `dape-compile-fn'.
 
-Debug adapter conn in configuration:
-- If only command is specified (without host and port), dape
-  will communicate with the debug adapter through stdin/stdout.
-- If both host and port are specified, Dape will connect to the
-  debug adapter.  If `command is specified, Dape will wait until the
-  command is initiated before it connects with host and port.
+Connection to Debug Adapter:
+- If command is specified and not port, dape communicates with the
+  debug adapter through stdin/stdout.
+- If host and port are specified, dape connects to the debug adapter.
+  If command is specified, dape waits until the command initializes
+  before connecting to host and port.
 
 Keywords in configuration:
-  Keywords are transmitted to the adapter during the initialize and
-  launch/attach requests.  Refer to `json-serialize' for detailed
-  information on how Dape serializes these keyword elements.  Dape
-  uses nil as false.
+  Keywords (symbols starting with colon) are transmitted to the
+  adapter during the initialize and launch/attach requests.  Refer to
+  `json-serialize' for detailed information on how dape serializes
+  these keyword elements. Dape uses nil as false.
 
-Functions and symbols in configuration:
- If a value in a key is a function, the function's return value will
- replace the key's value before execution.
- If a value in a key is a symbol, the symbol will recursively resolve
- at runtime."
+Functions and symbols:
+  - If a value is a function, its return value replaces the key's
+    value before execution.  The function is called with no arguments.
+  - If a value is a symbol, it resolves recursively before execution."
    :type '(alist :key-type (symbol :tag "Name")
                  :value-type
                  (plist :options
@@ -397,8 +395,11 @@ Functions and symbols in configuration:
 (defcustom dape-default-config-functions
   '(dape-config-autoport dape-config-tramp)
   "Functions applied on config before starting debugging session.
+Each function is called with one argument CONFIG and should return an
+PLIST of following the format specified in `dape-configs'.
+
 Functions are evaluated after functions defined in fn symbol in `dape-configs'.
-See `fn' in `dape-configs' function signature."
+See fn in `dape-configs' function signature."
   :type '(repeat function))
 
 (defcustom dape-command nil
@@ -657,7 +658,7 @@ The hook is run with one argument, the compilation buffer."
   "Guard var for *dape-repl* buffer text updates.")
 
 (define-minor-mode dape-active-mode
-  "On when dape debuggin session is active.
+  "On when dape debugging session is active.
 Non interactive global minor mode."
   :global t
   :interactive nil)
@@ -879,21 +880,29 @@ as is."
     (when (and (not (plist-get config 'prefix-local))
                (not (plist-get config 'prefix-remote))
                (plist-get config 'command))
-      ;; TODO Should probably log to repl here that prefix-local has
-      ;;      been modified.
-      (plist-put config 'prefix-local
-                 (tramp-completion-make-tramp-file-name
-                  (tramp-file-name-method parts)
-                  (tramp-file-name-user parts)
-                  (tramp-file-name-host parts)
-                  "")))
+      (let ((prefix-local
+             (tramp-completion-make-tramp-file-name
+              (tramp-file-name-method parts)
+              (tramp-file-name-user parts)
+              (tramp-file-name-host parts)
+              "")))
+        (dape--repl-message
+         (format "* Remote connection detected, setting %s to %S *"
+                 (propertize "prefix-local"
+                             'font-lock-face 'font-lock-keyword-face)
+                 prefix-local))
+        (plist-put config 'prefix-local prefix-local)))
     (when (and (plist-get config 'command)
                (plist-get config 'port)
                (not (plist-get config 'host))
                (equal (tramp-file-name-method parts) "ssh"))
-      ;; TODO Should probably log to repl here that host has been
-      ;;      modified.
-      (plist-put config 'host (file-remote-p default-directory 'host))))
+      (let ((host (file-remote-p default-directory 'host)))
+        (dape--repl-message
+         (format "* Remote connection detected, setting %s to %S *"
+                 (propertize "host"
+                             'font-lock-face 'font-lock-keyword-face)
+                 host))
+        (plist-put config 'host host))))
   config)
 
 (defun dape-ensure-command (config)
@@ -1823,8 +1832,6 @@ Killing the adapter and it's CONN."
   "Create symbol `dape-connection' instance from CONFIG.
 If started by an startDebugging request expects PARENT to
 symbol `dape-connection'."
-  (run-hooks 'dape-on-start-hooks)
-  (dape--repl-message "\n")
   (unless (plist-get config 'command-cwd)
     (plist-put config 'command-cwd default-directory))
   (let ((default-directory (plist-get config 'command-cwd))
@@ -1917,11 +1924,12 @@ symbol `dape-connection'."
                    (lambda (conn)
                      ;; error prints
                      (unless (dape--initialized-p conn)
-                       (dape--repl-message (concat "Adapter "
-                                                   (when (dape--parent conn)
-                                                     "child ")
-                                                   "connection shutdown without successfully initializing")
-                                           'dape-repl-error-face)
+                       (dape--repl-message
+                        (concat "Adapter "
+                                (when (dape--parent conn)
+                                  "child ")
+                                "connection shutdown without successfully initializing")
+                        'dape-repl-error-face)
                        ;; barf config
                        (dape--repl-message
                         (format "Configuration:\n%s"
@@ -2283,6 +2291,9 @@ Use SKIP-COMPILE to skip compilation."
   (interactive (list (dape--read-config)))
   (dape--with-request (dape-kill (dape--live-connection 'parent t))
     (dape--config-ensure config t)
+    ;; Hooks need to be run before any repl messaging but after we
+    ;; have ensured that config is executable.
+    (run-hooks 'dape-on-start-hooks)
     (when-let ((fn (or (plist-get config 'fn) 'identity))
                (fns (or (and (functionp fn) (list fn))
                         (and (listp fn) fn))))
@@ -2516,7 +2527,7 @@ When BACKWARD is non nil move backward instead."
 (define-minor-mode dape-breakpoint-global-mode
   "Adds fringe and margin breakpoint controls."
   :global t
-  :lighter "dape")
+  :lighter nil)
 
 (defvar dape--original-margin nil
   "Bookkeeping for buffer margin width.")
@@ -4091,7 +4102,7 @@ Send INPUT to DUMMY-PROCESS."
     (insert (format
              "* Welcome to Dape REPL! *
 Available Dape commands: %s
-Empty input will rerun last command.\n"
+Empty input will rerun last command.\n\n"
              (mapconcat
               (pcase-lambda (`(,str . ,command))
                 (setq str (concat str))
@@ -4186,7 +4197,7 @@ Empty input will rerun last command.\n"
                                   (eq key 'ensure))
                        collect (concat
                                 (propertize (format "%s" key)
-                                            'face font-lock-keyword-face)
+                                            'face 'font-lock-keyword-face)
                                 " "
                                 (with-current-buffer dape--minibuffer-last-buffer
                                   (condition-case err
@@ -4246,6 +4257,7 @@ non nil and function uses the minibuffer."
      (cond
       (skip-functions value)
       (skip-interactive
+       ;; Try to eval function, but escape if functions spawns an minibuffer
        (condition-case _
            (let ((enable-recursive-minibuffers nil))
              (funcall-interactively value))
@@ -4624,17 +4636,18 @@ See `eldoc-documentation-functions', for more infomation."
 
 ;;; Hooks
 
+(defun dape-kill-busy-wait ()
+  (let (done)
+    (dape--with-request (dape-kill dape--connection)
+      (setf done t))
+    ;; Busy wait for response at least 2 seconds
+    (cl-loop with max-iterations = 20
+             for i from 1 to max-iterations
+             until done
+             do (accept-process-output nil 0.1))))
+
 ;; Cleanup conn before bed time
-(add-hook 'kill-emacs-hook
-          (defun dape-kill-busy-wait ()
-            (let (done)
-              (dape--with-request (dape-kill dape--connection)
-                (setf done t))
-              ;; Busy wait for response at least 2 seconds
-              (cl-loop with max-iterations = 20
-                       for i from 1 to max-iterations
-                       until done
-                       do (accept-process-output nil 0.1)))))
+(add-hook 'kill-emacs-hook #'dape-kill-busy-wait)
 
 (provide 'dape)
 
