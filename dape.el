@@ -6,9 +6,9 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.7.0
+;; Version: 0.8.1
 ;; Homepage: https://github.com/svaante/dape
-;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.24"))
+;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
 ;; This file is not part of GNU Emacs.
 
@@ -27,14 +27,18 @@
 
 ;;; Commentary:
 
-;; This package is an debug adapter client for Emacs.
-;; Use `dape-configs' to set up your debug adapter configurations.
+;; Dape is a debug adapter client for Emacs.  The debug adapter
+;; protocol, much like its more well-known counterpart, the language
+;; server protocol, aims to establish a common API for programming
+;; tools.  However, instead of functionalities such as code
+;; completions, it provides a standardized interface for debuggers.
 
-;; To initiate debugging sessions, use the command `dape'.
+;; To begin a debugging session, invoke the `dape' command.  In the
+;; minibuffer prompt, enter a debug adapter configuration name from
+;; `dape-configs'.
 
-;; Note:
-;; For complete functionality, it's essential to activate `eldoc-mode'
-;; in your source buffers and enable `repeat-mode' for ergonomics
+; For complete functionality, make sure to enable `eldoc-mode' in your
+; source buffers and `repeat-mode' for more pleasant key mappings.
 
 ;; Package looks is heavily inspired by gdb-mi.el
 
@@ -140,7 +144,8 @@
                                     (format "%s -c \"import debugpy.adapter\"" python)))
                             (user-error "%s module debugpy is not installed" python))))
                command "python"
-               command-args ("-m" "debugpy.adapter")
+               command-args ("-m" "debugpy.adapter" "--host" "0.0.0.0" "--port" :autoport)
+               port :autoport
                :request "launch"
                :type "python"
                :cwd dape-cwd))
@@ -183,6 +188,17 @@
      :program "lib/main.dart"
      :toolArgs ["-d" "all"])
     (gdb
+     ensure (lambda (config)
+              (dape-ensure-command config)
+              (let* ((default-directory
+                      (or (dape-config-get config 'command-cwd)
+                          default-directory))
+                     (output (shell-command-to-string "gdb --version"))
+                     (version (save-match-data
+                                (when (string-match "GNU gdb \\(?:(.*) \\)?\\([0-9.]+\\)" output)
+                                  (string-to-number (match-string 1 output))))))
+                (unless (>= version 14.1)
+                  (user-error "Requires gdb version >= 14.1"))))
      modes (c-mode c-ts-mode c++-mode c++-ts-mode)
      command-cwd dape-command-cwd
      command "gdb"
@@ -402,7 +418,7 @@ Functions and symbols:
   '(dape-config-autoport dape-config-tramp)
   "Functions applied on config before starting debugging session.
 Each function is called with one argument CONFIG and should return an
-PLIST of following the format specified in `dape-configs'.
+PLIST of the format specified in `dape-configs'.
 
 Functions are evaluated after functions defined in fn symbol in `dape-configs'.
 See fn in `dape-configs' function signature."
@@ -1895,7 +1911,7 @@ symbol `dape-connection'."
                                                    command " ")))))
         ;; FIXME Why do I need this?
         (when (file-remote-p default-directory)
-          (sleep-for 0 300)))
+          (sleep-for 0.300)))
       ;; connect to server
       (let ((host (or (plist-get config 'host) "localhost")))
         (while (and (not process)
@@ -1909,7 +1925,7 @@ symbol `dape-connection'."
                                         :coding 'utf-8-emacs-unix
                                         :service (plist-get config 'port)
                                         :noquery t)))
-          (sleep-for 0 100)
+          (sleep-for 0.100)
           (setq retries (1- retries)))
         (if (zerop retries)
             (progn
@@ -2113,8 +2129,11 @@ CONN is inferred for interactive invocations."
   (dape--kill-buffers 'skip-process-buffers)
   (if (not conn)
       (dape--kill-buffers)
-    (dape--with-request (dape-kill conn)
-      (dape--kill-buffers))))
+    (let (;; Use a lower timeout, if trying to kill an to kill an
+          ;; unresponsive adapter 10s is an log time to wait.
+          (dape-request-timeout 3))
+      (dape--with-request (dape-kill conn)
+        (dape--kill-buffers)))))
 
 (defun dape-breakpoint-toggle ()
   "Add or remove breakpoint at current line."
