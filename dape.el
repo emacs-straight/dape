@@ -154,7 +154,7 @@
                :justMyCode nil
                :console "integratedTerminal"
                :showReturnValue t
-               :stopAtEntry t)))
+               :stopOnEntry nil)))
         `((debugpy ,@debugpy
                    :program dape-buffer-default
                    ,@common)
@@ -672,6 +672,10 @@ The hook is run with one argument, the compilation buffer."
   "List of watched expressions.")
 (defvar dape--connection nil
   "Debug adapter connection.")
+(defvar dape--connection-selected nil
+  "Selected debug adapter connection.
+If valid connection, this connection will be of highest priority when
+querying for connections with `dape--live-connection'.")
 
 (defvar-local dape--source nil
   "Store source plist in fetched source buffer.")
@@ -734,9 +738,39 @@ Run step like COMMAND on CONN.  If ARG is set run COMMAND ARG times."
       (unless error
         (dape--update-state conn 'running)
         (dape--remove-stack-pointers)
-        (dolist (thread (dape--threads conn))
-          (plist-put thread :status "running"))
+        (dape--threads-set-status conn nil t 'running)
         (run-hooks 'dape-update-ui-hooks)))))
+
+(defun dape--maybe-select-thread (conn thread-id force)
+  "Maybe set selected THREAD-ID and CONN.
+If FORCE is non nil force thread selection.
+If thread is selected, select CONN as well if no previously connection
+has been selected or if current selected connection does not have any
+stopped threads.
+See `dape--connection-selected'."
+  (when (and thread-id
+             (or force (not (dape--thread-id conn))))
+    (setf (dape--thread-id conn) thread-id)
+    (unless (and (member dape--connection-selected (dape--live-connections))
+                 (dape--stopped-threads dape--connection-selected))
+      (setq dape--connection-selected conn))))
+
+(defun dape--threads-set-status (conn thread-id all-threads status)
+  "Set string STATUS thread(s) for CONN.
+If THREAD-ID is non nil set status for thread with :id equal to
+THREAD-ID to STATUS.
+If ALL-THREADS is non nil set status of all all threads to STATUS."
+  (cond
+   ((not status) nil)
+   (all-threads
+    (cl-loop for thread in (dape--threads conn)
+             do (plist-put thread :status status)))
+   (thread-id
+    (plist-put
+     (cl-find-if (lambda (thread)
+                   (equal (plist-get thread :id) thread-id))
+                 (dape--threads conn))
+     :status status))))
 
 (defun dape--thread-id-object (conn)
   "Construct a thread id object for CONN."
@@ -747,7 +781,7 @@ Run step like COMMAND on CONN.  If ARG is set run COMMAND ARG times."
   "List of stopped threads for CONN."
   (and conn
        (mapcan (lambda (thread)
-                 (when (equal (plist-get thread :status) "stopped")
+                 (when (equal (plist-get thread :status) 'stopped)
                    (list thread)))
                (dape--threads conn))))
 
@@ -1089,7 +1123,7 @@ them then executes BODY."
 
 ;;; Connection
 
-(defun dape--live-connection (type &optional nowarn)
+(defun dape--live-connection (type &optional nowarn require-selected)
   "Get live connection of TYPE.
 TYPE is expected to be one of the following symbols:
 
@@ -1101,36 +1135,34 @@ running  last created child connection or parent which has an active
 stopped  last created child connection or parent which has stopped
          threads.
 
-If NOWARN does not error on no active process."
-  (let (conn)
-    (when-let* (dape--connection
-                (ordered-connections
-                 (append (dape--children dape--connection)
-                         (list dape--connection))))
-      (setq conn
-            (pcase type
-              ('parent
-               (when (jsonrpc-running-p dape--connection)
-                 dape--connection))
-              ('last
-               (seq-find (lambda (conn)
-                           (and (jsonrpc-running-p conn)
-                                (dape--thread-id conn)))
-                         ordered-connections))
-              ('running
-               (seq-find (lambda (conn)
-                           (and (jsonrpc-running-p conn)
-                                (dape--thread-id conn)
-                                (not (dape--stopped-threads conn))))
-                         ordered-connections))
-              ('stopped
-               (seq-find (lambda (conn)
-                           (and (jsonrpc-running-p conn)
-                                (dape--stopped-threads conn)))
-                         ordered-connections)))))
-    (unless nowarn
-      (unless conn
-        (user-error "No %s debug connection live" type)))
+If NOWARN is non nil does not error on no active process.
+If REQUIRE-SELECTED is non nil require returned connection to be the
+selected one, this has no effect when TYPE is parent.
+See `dape--connection-selected'."
+  (let* ((connections (dape--live-connections))
+         (selected (cl-find dape--connection-selected connections))
+         (ordered
+          `(,@(when selected
+               (list selected))
+            ,@(unless (and require-selected selected)
+                (reverse connections))))
+         (conn
+          (pcase type
+            ('parent
+             (car connections))
+            ('last
+             (seq-find 'dape--thread-id ordered))
+            ('running
+             (seq-find (lambda (conn)
+                         (and (dape--thread-id conn)
+                              (not (dape--stopped-threads conn))))
+                       ordered))
+            ('stopped
+             (seq-find (lambda (conn)
+                         (and (dape--stopped-threads conn)))
+                       ordered)))))
+    (unless (or nowarn conn)
+      (user-error "No %s debug connection live" type))
     conn))
 
 (defun dape--live-connections ()
@@ -1138,7 +1170,7 @@ If NOWARN does not error on no active process."
   (when (and dape--connection (jsonrpc-running-p dape--connection))
     (cons dape--connection
           (seq-filter 'jsonrpc-running-p
-                      (dape--children dape--connection)))))
+                      (reverse (dape--children dape--connection))))))
 
 (defclass dape-connection (jsonrpc-process-connection)
   ((last-id
@@ -1448,33 +1480,25 @@ See `dape-request' for expected CB signature."
               (dape--request-return cb)))))
     (dape--request-return cb)))
 
-(defun dape--update-threads (conn stopped-id all-threads-stopped cb)
-  "Helper for the stopped event to update `dape--threads'.
-Update adapter CONN threads with STOPPED-ID and ALL-THREADS-STOPPED.
+(defun dape--update-threads (conn cb)
+  "Update threads for CONN in-place if possible.
 See `dape-request' for expected CB signature."
+  ;; TODO Should debouce these request as they really flood the pipe
+  ;;      when triggered from "thread" event.
   (dape--with-request-bind
       ((&key threads &allow-other-keys) error)
       (dape-request conn "threads" nil)
     (setf (dape--threads conn)
-          (cl-map
-           'list
+          (mapcar
            (lambda (new-thread)
-             (let ((thread
-                    (or (seq-find
-                         (lambda (old-thread)
-                           (eq (plist-get new-thread :id)
-                               (plist-get old-thread :id)))
-                         (dape--threads conn))
-                        new-thread)))
-               (plist-put thread :name
-                          (plist-get new-thread :name))
-               (cond
-                (all-threads-stopped
-                 (plist-put thread :status "stopped"))
-                ((eq (plist-get thread :id) stopped-id)
-                 (plist-put thread :status "stopped"))
-                (t thread))))
-           threads))
+             (if-let ((old-thread
+                       (cl-find-if (lambda (old-thread)
+                                     (eql (plist-get new-thread :id)
+                                          (plist-get old-thread :id)))
+                                   (dape--threads conn))))
+                 (plist-put old-thread :name (plist-get new-thread :name))
+             new-thread))
+           (append threads nil)))
     (dape--request-return cb error)))
 
 (defun dape--stack-trace (conn thread nof cb)
@@ -1484,7 +1508,7 @@ See `dape-request' for expected CB signature."
         (delayed-stack-trace-p
          (dape--capable-p conn :supportsDelayedStackTraceLoading)))
     (cond
-     ((or (not (equal (plist-get thread :status) "stopped"))
+     ((or (not (equal (plist-get thread :status) 'stopped))
           (not (integerp (plist-get thread :id)))
           (and delayed-stack-trace-p (<= nof current-nof))
           (and (not delayed-stack-trace-p) (> current-nof 0)))
@@ -1556,8 +1580,8 @@ See `dape-request' for expected CB signature."
                                            (cons (plist-get object :name)
                                                  path)
                                            pred)
-              (setf responses (1+ responses))
-              (when (length= objects responses)
+              (when (length= objects
+                             (setf responses (1+ responses)))
                 (dape--request-return cb)))))))))
 
 (defun dape--evaluate-expression (conn frame-id expression context cb)
@@ -1684,9 +1708,10 @@ Starts a new adapter CONNs from ARGUMENTS."
 Starts a new adapter connection as per request of the debug adapter."
   (let ((config (plist-get arguments :configuration))
         (request (plist-get arguments :request)))
-    (cl-loop for (key value) on (dape--config conn) by 'cddr
+    (cl-loop with socket-conn-p = (plist-get config 'port)
+             for (key value) on (dape--config conn) by 'cddr
              unless (or (keywordp key)
-                        (eq key 'command))
+                        (and socket-conn-p (eq key 'command)))
              do (plist-put config key value))
     (when request
       (plist-put config :request request))
@@ -1765,68 +1790,73 @@ Stores `dape--sources' from BODY."
 (cl-defmethod dape-handle-event (conn (_event (eql process)) body)
   "Handle adapter CONNs process events.
 Logs and sets state based on BODY contents."
-  (let ((start-method (format "%sed"
-                              (or (plist-get body :startMethod)
-                                  "start"))))
+  (let ((start-method
+         (format "%sed" (or (plist-get body :startMethod)
+                            "start"))))
     (dape--update-state conn (intern start-method))
-    (dape--repl-message (format "Process %s %s"
-                                start-method
-                                (plist-get body :name)))))
+    (dape--repl-message
+     (format "Process %s %s" start-method (plist-get body :name)))))
 
 (cl-defmethod dape-handle-event (conn (_event (eql thread)) body)
   "Handle adapter CONNs thread events.
 Stores `dape--thread-id' and updates/adds thread in
 `dape--thread' from BODY."
-  (if-let ((thread
-            (seq-find (lambda (thread)
-                        (eq (plist-get thread :id)
-                            (plist-get body :threadId)))
-                      (dape--threads conn))))
-      (progn
-        (plist-put thread :status (plist-get body :reason))
-        (plist-put thread :name (or (plist-get thread :name)
-                                    "unnamed")))
-    ;; If new thread use thread state as global state
-    (dape--update-state conn (intern (plist-get body :reason)))
-    (push (list :status (plist-get body :reason)
-                :id (plist-get body :threadId)
-                :name "unnamed")
-          (dape--threads conn)))
-  ;; Select thread if we don't have any thread selected
-  (unless (dape--thread-id conn)
-    (setf (dape--thread-id conn) (plist-get body :threadId)))
-  (run-hooks 'dape-update-ui-hooks))
+  (cl-destructuring-bind (&key threadId reason &allow-other-keys)
+      body
+    (when (equal reason "started")
+      (dape--maybe-select-thread conn (plist-get body :threadId) nil))
+    (dape--with-request (dape--update-threads conn)
+      (dape--threads-set-status conn threadId nil
+                                (if (equal reason "exited")
+                                    'exited
+                                  'running))
+      (run-hooks 'dape-update-ui-hooks))))
 
 (cl-defmethod dape-handle-event (conn (_event (eql stopped)) body)
   "Handle adapter CONNs stopped events.
 Sets `dape--thread-id' from BODY and invokes ui refresh with
 `dape--update'."
-  (dape--update-state conn 'stopped)
-  (setf (dape--thread-id conn) (plist-get body :threadId))
-  (setf (dape--stack-id conn) nil)
-  (dape--with-request
-      (dape--update-threads conn
-                            (plist-get body :threadId)
-                            (plist-get body :allThreadsStopped))
-    (dape--update conn))
-  (if-let (((equal "exception" (plist-get body :reason)))
-           (texts
-            (seq-filter 'stringp
-                        (list (plist-get body :text)
-                              (plist-get body :description)))))
-      (let ((str (mapconcat 'identity texts ":\n\t")))
-        (setf (dape--exception-description conn) str)
-        (dape--repl-message str 'dape-repl-error-face))
-    (setf (dape--exception-description conn) nil))
-  (run-hooks 'dape-on-stopped-hooks))
+  (cl-destructuring-bind
+      (&key threadId reason allThreadsStopped &allow-other-keys)
+      body
+    (dape--update-state conn 'stopped)
+    (dape--maybe-select-thread conn threadId 'force)
+    ;; Reset stack id to force a new frame in
+    ;; `dape--current-stack-frame'.
+    (setf (dape--stack-id conn) nil)
+    ;; Important to do this before `dape--update' to be able to setup
+    ;; exception overlay.
+    (pcase reason
+      ;; Output exception info in overlay and repl
+      ("exception"
+       (let* ((texts
+               (seq-filter 'stringp
+                           (list (plist-get body :text)
+                                 (plist-get body :description))))
+              (str (mapconcat 'identity texts ":\n\t")))
+         (setf (dape--exception-description conn) str)
+         (dape--repl-message str 'dape-repl-error-face)))
+      ;; TODO Would be nice to display other `reasons'
+      (_
+       ;; Cleanup exception for
+       (setf (dape--exception-description conn) nil)))
+    (dape--with-request (dape--update-threads conn)
+      (dape--threads-set-status conn threadId (eq allThreadsStopped t)
+                                'stopped)
+      (dape--update conn))
+    (run-hooks 'dape-on-stopped-hooks)))
 
 (cl-defmethod dape-handle-event (conn (_event (eql continued)) body)
   "Handle adapter CONN continued events.
 Sets `dape--thread-id' from BODY if not set."
-  (dape--update-state conn 'running)
-  (dape--remove-stack-pointers)
-  (unless (dape--thread-id conn)
-    (setf (dape--thread-id conn) (plist-get body :threadId))))
+  (cl-destructuring-bind
+      (&key threadId allThreadsContinued &allow-other-keys)
+      body
+    (dape--update-state conn 'running)
+    (dape--remove-stack-pointers)
+    (dape--maybe-select-thread conn threadId nil)
+    (dape--threads-set-status conn threadId (eq allThreadsContinued t) 'running)
+    (run-hooks 'dape-update-ui-hooks)))
 
 (cl-defmethod dape-handle-event (_conn (_event (eql output)) body)
   "Handle output events by printing BODY with `dape--repl-message'."
@@ -1841,11 +1871,11 @@ Sets `dape--thread-id' from BODY if not set."
 Prints exit code from BODY."
   (dape--update-state conn 'exited)
   (dape--remove-stack-pointers)
-  (dape--repl-message (format "* Exit code: %d *"
-                              (plist-get body :exitCode))
-                      (if (zerop (plist-get body :exitCode))
-                          'dape-repl-success-face
-                        'dape-repl-error-face)))
+  (dape--repl-message
+   (format "* Exit code: %d *" (plist-get body :exitCode))
+   (if (zerop (plist-get body :exitCode))
+       'dape-repl-success-face
+     'dape-repl-error-face)))
 
 (cl-defmethod dape-handle-event (conn (_event (eql terminated)) _body)
   "Handle adapter CONNs terminated events.
@@ -1961,55 +1991,56 @@ symbol `dape-connection'."
         (when dape-debug
           (dape--repl-message (format "* Adapter started with %S *"
                                       (mapconcat 'identity command " ")))))))
-    (make-instance 'dape-connection
-                   :name "dape-connection"
-                   :config config
-                   :parent parent
-                   :server-process server-process
-                   :events-buffer-config `(:size ,(if dape-debug nil 0)
-                                                 :format full)
-                   :on-shutdown
-                   (lambda (conn)
-                     ;; error prints
-                     (unless (dape--initialized-p conn)
-                       (dape--repl-message
-                        (concat "Adapter "
-                                (when (dape--parent conn)
-                                  "child ")
-                                "connection shutdown without successfully initializing")
-                        'dape-repl-error-face)
-                       ;; barf config
-                       (dape--repl-message
-                        (format "Configuration:\n%s"
-                                (cl-loop for (key value) on (dape--config conn) by 'cddr
-                                         concat (format "  %s %S\n" key value)))
-                        'dape-repl-error-face)
-                       ;; barf connection stderr
-                       (when-let* ((proc (jsonrpc--process conn))
-                                   (buffer (process-get proc 'jsonrpc-stderr)))
-                         (with-current-buffer buffer
-                           (dape--repl-message (buffer-string) 'dape-repl-error-face)))
-                       ;; barf server stderr
-                       (when-let* ((server-proc (dape--server-process conn))
-                                   (buffer (process-get server-proc 'stderr-buffer)))
-                         (with-current-buffer buffer
-                           (dape--repl-message (buffer-string) 'dape-repl-error-face))))
-                     ;; cleanup server process
-                     (unless (dape--parent conn)
-                       (dape--remove-stack-pointers)
-                       (when-let ((server-process
-                                   (dape--server-process conn)))
-                         (delete-process server-process)
-                         (while (process-live-p server-process)
-                           (accept-process-output nil nil 0.1))))
-                     ;; ui
-                     (run-with-timer 1 nil (lambda ()
-                                             (when (eq dape--connection conn)
-                                               (dape-active-mode -1)
-                                               (force-mode-line-update t)))))
-                   :request-dispatcher 'dape-handle-request
-                   :notification-dispatcher 'dape-handle-event
-                   :process process)))
+    (make-instance
+     'dape-connection
+     :name "dape-connection"
+     :config config
+     :parent parent
+     :server-process server-process
+     :events-buffer-config `(:size ,(if dape-debug nil 0)
+                                   :format full)
+     :on-shutdown
+     (lambda (conn)
+       ;; error prints
+       (unless (dape--initialized-p conn)
+         (dape--repl-message
+          (concat "Adapter "
+                  (when (dape--parent conn)
+                    "child ")
+                  "connection shutdown without successfully initializing")
+          'dape-repl-error-face)
+         ;; barf config
+         (dape--repl-message
+          (format "Configuration:\n%s"
+                  (cl-loop for (key value) on (dape--config conn) by 'cddr
+                           concat (format "  %s %S\n" key value)))
+          'dape-repl-error-face)
+         ;; barf connection stderr
+         (when-let* ((proc (jsonrpc--process conn))
+                     (buffer (process-get proc 'jsonrpc-stderr)))
+           (with-current-buffer buffer
+             (dape--repl-message (buffer-string) 'dape-repl-error-face)))
+         ;; barf server stderr
+         (when-let* ((server-proc (dape--server-process conn))
+                     (buffer (process-get server-proc 'stderr-buffer)))
+           (with-current-buffer buffer
+             (dape--repl-message (buffer-string) 'dape-repl-error-face))))
+       ;; cleanup server process
+       (unless (dape--parent conn)
+         (dape--remove-stack-pointers)
+         (when-let ((server-process
+                     (dape--server-process conn)))
+           (delete-process server-process)
+           (while (process-live-p server-process)
+             (accept-process-output nil nil 0.1))))
+       ;; ui
+       (run-with-timer 1 nil (lambda ()
+                               (when (eq dape--connection conn)
+                                 (dape-active-mode -1)
+                                 (force-mode-line-update t)))))
+     :request-dispatcher 'dape-handle-request
+     :notification-dispatcher 'dape-handle-event
+     :process process)))
 
 
 ;;; Commands
@@ -2047,7 +2078,7 @@ CONN is inferred for interactive invocations."
       (dape--update-state conn 'running)
       (dape--remove-stack-pointers)
       (dolist (thread (dape--threads conn))
-        (plist-put thread :status "running"))
+        (plist-put thread :status 'running))
       (run-hooks 'dape-update-ui-hooks))))
 
 (defun dape-pause (conn)
@@ -2068,6 +2099,7 @@ CONN is inferred for interactive invocations."
   (cond
    ((and conn
          (dape--capable-p conn :supportsRestartRequest))
+    (setq dape--connection-selected nil)
     (setf (dape--threads conn) nil)
     (setf (dape--thread-id conn) nil)
     (setf (dape--modules conn) nil)
@@ -2130,7 +2162,7 @@ CONN is inferred for interactive invocations."
   (if (not conn)
       (dape--kill-buffers)
     (let (;; Use a lower timeout, if trying to kill an to kill an
-          ;; unresponsive adapter 10s is an log time to wait.
+          ;; unresponsive adapter 10s is an long time to wait.
           (dape-request-timeout 3))
       (dape--with-request (dape-kill conn)
         (dape--kill-buffers)))))
@@ -2204,21 +2236,34 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
 (defun dape-select-thread (conn thread-id)
   "Select currrent thread for adapter CONN by THREAD-ID."
   (interactive
-   (let* ((conn (dape--live-connection 'stopped))
+   (let* ((conn (dape--live-connection 'last))
           (collection
-           (mapcar (lambda (thread) (cons (plist-get thread :name)
-                                          (plist-get thread :id)))
-                   (dape--threads conn)))
+           (cl-loop
+            with conns = (dape--live-connections)
+            with conn-prefix-p = (length>
+                                  (cl-remove-if-not 'dape--threads conns) 1)
+            for conn in conns
+            for index upfrom 1
+            append (cl-loop
+                    for thread in (dape--threads conn)
+                    for name = (concat
+                                (when conn-prefix-p
+                                  (format "%s: " index))
+                                (format "%s %s"
+                                        (plist-get thread :id)
+                                        (plist-get thread :name)))
+                    collect (list name conn (plist-get thread :id)))))
           (thread-name
            (completing-read
             (format "Select thread (current %s): "
-                    (thread-first conn
-                                  (dape--current-stack-frame)
+                    ;; TODO Show current thread with connection prefix
+                    (thread-first conn (dape--current-thread)
                                   (plist-get :name)))
             collection
             nil t)))
-     (list conn (alist-get thread-name collection nil nil 'equal))))
+     (alist-get thread-name collection nil nil 'equal)))
   (setf (dape--thread-id conn) thread-id)
+  (setq dape--connection-selected conn)
   (dape--update conn t))
 
 (defun dape-select-stack (conn stack-id)
@@ -2903,15 +2948,14 @@ If SKIP-DISPLAY is non nil refrain from going to selected stack."
                         (memq major-mode '(dape-repl-mode)))
                 (select-window window))
               (unless skip-stack-pointer-flash
-                (with-current-buffer (marker-buffer marker)
-                  (with-selected-window window
-                    (goto-char (marker-position marker))
-                    (pulse-momentary-highlight-region (line-beginning-position)
-                                                      (line-beginning-position 2)
-                                                      'next-error))))))
                 ;; FIXME Should be called with idle-timer as to
                 ;;       guarantee that we are not in `save-excursion'
-                ;;       context.  But this makes tests hard write.
+                ;;       context.  But this makes tests to hard write.
+                (with-selected-window window
+                  (goto-char (marker-position marker))
+                  (pulse-momentary-highlight-region (line-beginning-position)
+                                                    (line-beginning-position 2)
+                                                    'next-error)))))
           (with-current-buffer (marker-buffer marker)
             (dape--add-eldoc-hook)
             (save-excursion
@@ -3313,11 +3357,14 @@ displayed."
 
 (defvar dape--info-thread-position nil
   "`dape-info-thread-mode' marker for `overlay-arrow-variable-list'.")
+(defvar dape-info--threads-bench nil
+  "List of benched connections.")
+(defvar dape-info--threads-tt-bench 2
+  "Time to Bench.")
 
-(dape--command-at-line dape-info-select-thread (dape--info-thread)
+(dape--command-at-line dape-info-select-thread (dape--info-thread dape--info-conn)
   "Select thread at line in dape info buffer."
-  (dape-select-thread (dape--live-connection 'stopped)
-                      (plist-get dape--info-thread :id)))
+  (dape-select-thread dape--info-conn (plist-get dape--info-thread :id)))
 
 (defvar dape--info-threads-font-lock-keywords
   (append gdb-threads-font-lock-keywords
@@ -3330,77 +3377,116 @@ displayed."
   ;; TODO Add bindings for individual threads.
   )
 
-(defun dape--info-threads-all-stack-trace (conn cb)
-  "Populate CONN stack frame data for non selected threads.
+(defun dape--info-threads-stack-info (conn cb)
+  "Populate stack frame info for CONNs threads.
 See `dape-request' for expected CB signature."
-  (if (not (dape--threads conn))
-      (dape--request-return cb)
-    (let ((responses 0))
-      (dolist (thread (dape--threads conn))
-        (dape--with-request (dape--stack-trace conn thread 1)
-          (setf responses (1+ responses))
-          (when (length= (dape--threads conn) responses)
-            (dape--request-return cb)))))))
+  (let (threads)
+    (cond
+     ;; Current CONN is benched
+     ((member conn dape-info--threads-bench)
+      (dape--request-return cb))
+     ;; Stopped threads
+     ((setq threads
+            (cl-remove-if (lambda (thread)
+                            (plist-get thread :request-in-flight))
+                          (dape--stopped-threads conn)))
+      (let ((start-time (current-time))
+            (responses 0))
+        (dolist (thread threads)
+          ;; HACK Keep track of requests in flight as `revert-buffer'
+          ;;      might be called at any time, and we want keep
+          ;;      uneasy chatter at a minimum.
+          (plist-put thread :request-in-flight t)
+          (dape--with-request (dape--stack-trace conn thread 1)
+            (plist-put thread :request-in-flight nil)
+            ;; Time response, if slow bench that CONN
+            (when (and (time-less-p (timer-relative-time
+                                     start-time dape-info--threads-tt-bench)
+                                    (current-time))
+                       (not (member conn dape-info--threads-bench)))
+              (dape--repl-message
+               "* Disabling stack trace info in Threads buffer for connection (slow) *"
+               'dape-repl-error-face)
+              (push conn dape-info--threads-bench))
+            ;; When all request have resolved return
+            (when (length= threads (setf responses (1+ responses)))
+              (dape--request-return cb))))))
+     ;; No stopped threads
+     (t (dape--request-return cb))))
+  ;; House keeping, no need to keep dead connections in bench
+  (when dape-info--threads-bench
+    (let ((conns (dape--live-connections)))
+      (cl-delete-if-not (lambda (conn) (member conn conns))
+                        dape-info--threads-bench))))
 
 (define-derived-mode dape-info-threads-mode dape-info-parent-mode "Threads"
-  "Major mode for Dape info threads."
+  "Major mode for dape info threads."
   :interactive nil
   (setq font-lock-defaults '(dape--info-threads-font-lock-keywords)
         dape--info-thread-position (make-marker))
   (add-to-list 'overlay-arrow-variable-list 'dape--info-thread-position))
 
-
 (cl-defmethod dape--info-revert (&context (major-mode (eql dape-info-threads-mode))
                                           &optional _ignore-auto _noconfirm _preserve-modes)
   "Revert buffer function for MAJOR-MODE `dape-info-threads-mode'."
-  (if-let ((conn (or (dape--live-connection 'stopped t)
-                     (dape--live-connection 'last t)))
-           (threads (dape--threads conn)))
-      (dape--with-request (dape--info-threads-all-stack-trace conn)
-        (dape--info-update-with
-          (let ((table (make-gdb-table))
-                (current-thread (dape--current-thread conn)))
-            (set-marker dape--info-thread-position nil)
-            (dolist (thread threads)
-              (gdb-table-add-row
-               table
-               (list
-                (format "%s" (plist-get thread :id))
-                (concat
-                 (when dape-info-thread-buffer-verbose-names
-                   (concat (plist-get thread :name) " "))
-                 (or (plist-get thread :status)
-                     "unknown")
-                 ;; Include frame information for stopped threads
-                 (if-let* (((equal (plist-get thread :status) "stopped"))
-                           (top-stack (thread-first thread
-                                                    (plist-get :stackFrames)
-                                                    (car))))
-                     (concat
-                      " in " (plist-get top-stack :name)
-                      (when-let* ((dape-info-thread-buffer-locations)
-                                  (path (thread-first top-stack
-                                                      (plist-get :source)
-                                                      (plist-get :path)))
-                                  (path (dape--path conn path 'local))
-                                  (line (plist-get top-stack :line)))
-                        (concat " of " (dape--format-file-line path line)))
-                      (when-let ((dape-info-thread-buffer-addresses)
-                                 (addr
-                                  (plist-get top-stack :instructionPointerReference)))
-                        (concat " at " addr))
-                      " "))))
-               (list
-                'dape--info-thread thread
-                'mouse-face 'highlight
-                'keymap dape-info-threads-line-map
-                'help-echo "mouse-2, RET: select thread")))
-            (insert (gdb-table-string table " "))
-            (when current-thread
-              (cl-loop for thread in threads
-                       for line from 1
-                       until (eq current-thread thread)
-                       finally (gdb-mark-line line dape--info-thread-position))))))
+  (if-let ((conn (dape--live-connection 'last t)))
+      (dape--with-request (dape--info-threads-stack-info conn)
+        (cl-loop
+         initially do (set-marker dape--info-thread-position nil)
+         with table = (make-gdb-table)
+         with conns = (dape--live-connections)
+         with current-thread = (dape--current-thread conn)
+         with conn-prefix-p = (length> (cl-remove-if-not 'dape--threads conns) 1)
+         with line-count = 0
+         with selected-line = nil
+         for conn in conns
+         for index upfrom 1 do
+         (cl-loop
+          for thread in (dape--threads conn) do
+          (setq line-count (1+ line-count))
+          (when (eq current-thread thread)
+            (setq selected-line line-count))
+          (gdb-table-add-row
+           table
+           (append
+            (when conn-prefix-p
+              (list (format "%s:" index)))
+            (list (format "%s" (plist-get thread :id)))
+            (list
+             (concat
+              (when dape-info-thread-buffer-verbose-names
+                (concat (plist-get thread :name) " "))
+              (or (and-let* ((status (plist-get thread :status)))
+                    (format "%s" status))
+                  "unknown")
+              ;; Include frame information for stopped threads
+              (if-let* (((equal (plist-get thread :status) 'stopped))
+                        (top-stack (car (plist-get thread :stackFrames))))
+                  (concat
+                   " in " (plist-get top-stack :name)
+                   (when-let* ((dape-info-thread-buffer-locations)
+                               (path (thread-first top-stack
+                                                   (plist-get :source)
+                                                   (plist-get :path)))
+                               (path (dape--path conn path 'local))
+                               (line (plist-get top-stack :line)))
+                     (concat " of " (dape--format-file-line path line)))
+                   (when-let ((dape-info-thread-buffer-addresses)
+                              (addr
+                               (plist-get top-stack :instructionPointerReference)))
+                     (concat " at " addr))
+                   " ")))))
+           (list
+            'dape--info-conn conn
+            'dape--info-thread thread
+            'mouse-face 'highlight
+            'keymap dape-info-threads-line-map
+            'help-echo "mouse-2, RET: select thread")))
+         finally do
+         (dape--info-update-with
+           (insert (gdb-table-string table " "))
+           (when selected-line
+             (gdb-mark-line selected-line dape--info-thread-position)))))
     (dape--info-update-with
       (set-marker dape--info-thread-position nil)
       (insert "No thread information available."))))
@@ -3469,8 +3555,8 @@ current buffer with CONN config."
 (cl-defmethod dape--info-revert (&context (major-mode (eql dape-info-stack-mode))
                                           &optional _ignore-auto _noconfirm _preserve-modes)
   "Revert buffer function for MAJOR-MODE `dape-info-stack-mode'."
-  (let* ((conn (or (dape--live-connection 'stopped t)
-                   (dape--live-connection 'last t)))
+  (let* ((conn (or (dape--live-connection 'stopped t t)
+                   (dape--live-connection 'last t t)))
          (current-thread (dape--current-thread conn))
          (stack-frames (plist-get current-thread :stackFrames))
          (current-stack-frame (dape--current-stack-frame conn)))
@@ -3479,7 +3565,12 @@ current buffer with CONN config."
           (not (dape--stopped-threads conn)))
       (dape--info-update-with
         (set-marker dape--info-stack-position nil)
-        (insert "No stopped threads.")))
+        (cond
+         (current-thread
+          (insert (format "Thread \"%s\" is not stopped."
+                          (plist-get current-thread :name))))
+         (t
+          (insert "No stack information.")))))
      (t
       ;; Why are we updating it twice? Calls to `dape--stack-trace'
       ;; with an large nof can be expensive, therefore 1 nof is fetchd
@@ -3809,8 +3900,7 @@ plist are used as keymap for each sections defined by the key."
             (unless error
               (cl-loop for (key value) on body by 'cddr
                        do (plist-put plist key value)))
-            (setf responses (1+ responses))
-            (when (length= dape--watched responses)
+            (when (length= dape--watched (setf responses (1+ responses)))
               (dape--with-request
                   (dape--variables-recursive conn
                                              (list :variables dape--watched)
@@ -4020,6 +4110,8 @@ Send INPUT to DUMMY-PROCESS."
   ;;       - compleation is messed up if point is in text and
   ;;         compleation is triggered
   ;;       - compleation is done on whole line for `debugpy'
+  ;;       - compleation for dape commands should only be valid when
+  ;;         command is starts at `bolp'
   (when (or (symbol-at-point)
             (member (buffer-substring-no-properties (1- (point)) (point))
                     (or (thread-first (dape--live-connection 'last t)
@@ -4627,7 +4719,12 @@ See `eldoc-documentation-functions', for more infomation."
             (propertize
              (format "%s" (or (and conn (dape--state conn))
                               'unknown))
-             'face 'font-lock-doc-face))))
+             'face 'font-lock-doc-face)
+            (when-let* ((conns (dape--live-connections))
+                        (nof-conns
+                         (length (cl-remove-if-not 'dape--threads conns)))
+                        ((> nof-conns 1)))
+              (propertize (format "(%s)" nof-conns) 'face 'shadow)))))
 
 (add-to-list 'mode-line-misc-info
              `(dape-active-mode
