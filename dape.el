@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.8.1
+;; Version: 0.9.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -4724,7 +4724,9 @@ See `eldoc-documentation-functions', for more infomation."
                         (nof-conns
                          (length (cl-remove-if-not 'dape--threads conns)))
                         ((> nof-conns 1)))
-              (propertize (format "(%s)" nof-conns) 'face 'shadow)))))
+              (propertize (format "(%s)" nof-conns)
+                          'face 'shadow
+                          'help-echo "Active child connections")))))
 
 (add-to-list 'mode-line-misc-info
              `(dape-active-mode
