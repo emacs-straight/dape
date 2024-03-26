@@ -1823,15 +1823,17 @@ Stores `dape--thread-id' and updates/adds thread in
 Sets `dape--thread-id' from BODY and invokes ui refresh with
 `dape--update'."
   (cl-destructuring-bind
-      (&key threadId reason allThreadsStopped &allow-other-keys)
+      (&key threadId reason allThreadsStopped hitBreakpointIds
+            &allow-other-keys)
       body
     (dape--update-state conn 'stopped)
     (dape--maybe-select-thread conn threadId 'force)
     ;; Reset stack id to force a new frame in
     ;; `dape--current-stack-frame'.
-    (setf (dape--stack-id conn) nil)
+    (setf (dape--stack-id conn) nil
+          ;; Reset exception description
+          (dape--exception-description conn) nil)
     ;; Important to do this before `dape--update' to be able to setup
-    ;; exception overlay.
     (pcase reason
       ;; Output exception info in overlay and repl
       ("exception"
@@ -1842,10 +1844,12 @@ Sets `dape--thread-id' from BODY and invokes ui refresh with
               (str (mapconcat 'identity texts ":\n\t")))
          (setf (dape--exception-description conn) str)
          (dape--repl-message str 'dape-repl-error-face)))
-      ;; TODO Would be nice to display other `reasons'
       (_
-       ;; Cleanup exception for
-       (setf (dape--exception-description conn) nil)))
+       ;; TODO Would be nice to display other `reasons'
+       ))
+    ;; Update breakpoints hits
+    (dape--breakpoints-stopped hitBreakpointIds)
+    ;; Update `dape--threads'
     (dape--with-request (dape--update-threads conn)
       (dape--threads-set-status conn threadId (eq allThreadsStopped t)
                                 'stopped)
@@ -1901,6 +1905,7 @@ Killing the adapter and it's CONN."
   "Preform some cleanup and start debugging with CONN."
   (unless (dape--parent conn)
     (dape--remove-stack-pointers)
+    (dape--breakpoints-reset)
     (cl-loop for (_ buffer) on dape--source-buffers by 'cddr
              when (buffer-live-p buffer)
              do (kill-buffer buffer))
@@ -2102,6 +2107,7 @@ CONN is inferred for interactive invocations."
 CONN is inferred for interactive invocations."
   (interactive (list (dape--live-connection 'last t)))
   (dape--remove-stack-pointers)
+  (dape--breakpoints-reset)
   (cond
    ((and conn
          (dape--capable-p conn :supportsRestartRequest))
@@ -2412,7 +2418,7 @@ Use SKIP-COMPILE to skip compilation."
 
 ;;; Compile
 
-(defvar dape--compile-config nil)
+(defvar-local dape--compile-config nil)
 
 (defun dape--compile-compilation-finish (buffer str)
   "Hook for `dape--compile-compilation-finish'.
@@ -2431,12 +2437,13 @@ Using BUFFER and STR."
   "Start compilation for CONFIG."
   (let ((default-directory (dape--guess-root config))
         (command (plist-get config 'compile)))
-    (setq dape--compile-config config)
-    ;; FIXME: Kill current compilation before adding hook otherwise we
-    ;;        we might call `dape' on old compilation.
-    (add-hook 'compilation-finish-functions
-              #'dape--compile-compilation-finish)
-    (funcall dape-compile-fn command)))
+    ;; TODO Is it really necessary to have `dape-compile-fn' as an
+    ;;      option as `default-directory' is set.
+    (funcall dape-compile-fn command)
+    (with-current-buffer (compilation-find-buffer)
+      (setq dape--compile-config config)
+      (add-hook 'compilation-finish-functions
+                #'dape--compile-compilation-finish nil t))))
 
 
 ;;; Memory viewer
@@ -2678,6 +2685,20 @@ contents."
   (apply 'move-overlay overlay
          (dape--overlay-region (eq (overlay-get overlay 'category)
                                    'dape-stack-pointer))))
+
+(defun dape--breakpoints-reset ()
+  "Reset breakpoints hits."
+  (cl-loop for ov in dape--breakpoints
+           do (overlay-put ov 'dape-hits nil)))
+
+(defun dape--breakpoints-stopped (hit-breakpoint-ids)
+  "Increment `dape-hits' from array of HIT-BREAKPOINT-IDS."
+  (cl-loop for id across hit-breakpoint-ids
+           for ov = (cl-find id dape--breakpoints
+                             :key (lambda (ov) (overlay-get ov 'dape-id)))
+           when ov
+           do (overlay-put ov 'dape-hits
+                           (1+ (or (overlay-get ov 'dape-hits) 0)))))
 
 (defun dape--breakpoints-at-point ()
   "Dape overlay breakpoints at point."
@@ -3304,58 +3325,72 @@ displayed."
                                           &optional _ignore-auto _noconfirm _preserve-modes)
   "Revert buffer function for MAJOR-MODE `dape-info-breakpoints-mode'."
   (dape--info-update-with
-    (let ((table (make-gdb-table)))
-      (gdb-table-add-row table '("Type" "On" "Where" "What"))
+    (let ((table (make-gdb-table))
+          ;; Show Hits only when it's supported e.i. when breakpoint
+          ;; id is included in the "stopped" event.
+          (with-hits-p
+           (cl-find-if (lambda (ov)
+                         (when-let ((hits (overlay-get ov 'dape-hits)))
+                           (> hits 0)))
+                       dape--breakpoints)))
+      (gdb-table-add-row table
+                         `("Type" "On" "Where"
+                           ,@(when with-hits-p '("Hits"))
+                           "What"))
       (dolist (breakpoint (reverse dape--breakpoints))
         (when-let* ((buffer (overlay-buffer breakpoint))
                     (line (with-current-buffer buffer
                             (line-number-at-pos (overlay-start breakpoint)))))
           (gdb-table-add-row
            table
-           (list
-            (cond
-             ((overlay-get breakpoint 'dape-log-message)
-              "log")
-             ((overlay-get breakpoint 'dape-expr-message)
-              "condition")
-             ("breakpoint"))
-            (if (overlay-get breakpoint 'dape-verified)
-                (propertize "y" 'font-lock-face
-                            font-lock-warning-face)
-              (propertize "" 'font-lock-face
-                          font-lock-comment-face))
-            (if-let (file (buffer-file-name buffer))
-                (dape--format-file-line file line)
-              (buffer-name buffer))
-            (cond
-             ((overlay-get breakpoint 'dape-log-message)
-              (propertize (overlay-get breakpoint 'dape-log-message)
-                          'face 'dape-log-face))
-             ((overlay-get breakpoint 'dape-expr-message)
-              (propertize (overlay-get breakpoint 'dape-expr-message)
-                          'face 'dape-expression-face))
-             ("")))
+           `(,(cond
+               ((overlay-get breakpoint 'dape-log-message)
+                "log")
+               ((overlay-get breakpoint 'dape-expr-message)
+                "cond")
+               ("break"))
+             ,(if (overlay-get breakpoint 'dape-verified)
+                  (propertize "y" 'font-lock-face
+                              font-lock-warning-face)
+                (propertize "" 'font-lock-face
+                            font-lock-comment-face))
+             ,(if-let (file (buffer-file-name buffer))
+                  (dape--format-file-line file line)
+                (buffer-name buffer))
+             ,@(when with-hits-p
+                 (if-let ((hits (overlay-get breakpoint 'dape-hits)))
+                     (list (format "%s" hits))
+                   '("")))
+             ,(cond
+               ((overlay-get breakpoint 'dape-log-message)
+                (propertize (overlay-get breakpoint 'dape-log-message)
+                            'face 'dape-log-face))
+               ((overlay-get breakpoint 'dape-expr-message)
+                (propertize (overlay-get breakpoint 'dape-expr-message)
+                            'face 'dape-expression-face))
+               ("")))
            (list
             'dape--info-breakpoint breakpoint
             'keymap dape-info-breakpoints-line-map
             'mouse-face 'highlight
             'help-echo "mouse-2, RET: visit breakpoint"))))
       (dolist (exception dape--exceptions)
-        (gdb-table-add-row table
-                           (list
-                            "exception"
-                            (if (plist-get exception :enabled)
-                                (propertize "y" 'font-lock-face
-                                            font-lock-warning-face)
-                              (propertize "n" 'font-lock-face
-                                          font-lock-comment-face))
-                            (plist-get exception :label)
-                            " ")
-                           (list
-                            'dape--info-exception exception
-                            'mouse-face 'highlight
-                            'keymap dape-info-exceptions-line-map
-                            'help-echo "mouse-2, RET: toggle exception")))
+        (gdb-table-add-row
+         table
+         `("excep"
+           ,(if (plist-get exception :enabled)
+                (propertize "y" 'font-lock-face
+                            font-lock-warning-face)
+              (propertize "n" 'font-lock-face
+                          font-lock-comment-face))
+           ,(plist-get exception :label)
+           ,@(when with-hits-p "")
+           "" "")
+         (list
+          'dape--info-exception exception
+          'mouse-face 'highlight
+          'keymap dape-info-exceptions-line-map
+          'help-echo "mouse-2, RET: toggle exception")))
       (insert (gdb-table-string table " ")))))
 
 
@@ -4116,8 +4151,6 @@ Send INPUT to DUMMY-PROCESS."
   ;;       - compleation is messed up if point is in text and
   ;;         compleation is triggered
   ;;       - compleation is done on whole line for `debugpy'
-  ;;       - compleation for dape commands should only be valid when
-  ;;         command is starts at `bolp'
   (when (or (symbol-at-point)
             (member (buffer-substring-no-properties (1- (point)) (point))
                     (or (thread-first (dape--live-connection 'last t)
@@ -4135,14 +4168,18 @@ Send INPUT to DUMMY-PROCESS."
                  (car bounds)
                  (cdr bounds)))
            (collection
-            (mapcar (lambda (cmd)
-                      (cons (car cmd)
-                            (format " %s"
-                                    (propertize (symbol-name (cdr cmd))
-                                                'face 'font-lock-builtin-face))))
-                    (append dape-repl-commands
-                            (when dape-repl-use-shorthand
-                              (dape--repl-shorthand-alist)))))
+            ;; Add `dape-repl-commands' only if completion starts at
+            ;; `bolp' as `dape-repl-commands' is only valid if input
+            ;; `equals' command key.
+            (when (eql (car bounds) (line-beginning-position))
+              (mapcar (lambda (cmd)
+                        (cons (car cmd)
+                              (format " %s"
+                                      (propertize (symbol-name (cdr cmd))
+                                                  'face 'font-lock-builtin-face))))
+                      (append dape-repl-commands
+                              (when dape-repl-use-shorthand
+                                (dape--repl-shorthand-alist))))))
            done)
       (list
        (car bounds)
