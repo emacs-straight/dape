@@ -802,7 +802,9 @@ If ALL-THREADS is non nil set status of all all threads to STATUS."
   "Return translate absolute PATH in FORMAT from CONN config.
 Accepted FORMAT values are local and remote.
 See `dape-configs' symbols prefix-local prefix-remote."
-  (if-let* ((config (dape--config conn))
+  (if-let* ((config (dape--config
+                     ;; Fallback to last connection
+                     (or conn dape--connection)))
             (path
              (expand-file-name
               path
@@ -2427,8 +2429,8 @@ Using BUFFER and STR."
                #'dape--compile-compilation-finish)
   (cond
    ((equal "finished\n" str)
-    (run-hook-with-args 'dape-compile-compile-hooks buffer)
-    (dape dape--compile-config 'skip-compile))
+    (dape dape--compile-config 'skip-compile)
+    (run-hook-with-args 'dape-compile-compile-hooks buffer))
    (t
     (dape--repl-message (format "* Compilation failed %s *"
                                 (string-trim-right str))))))
