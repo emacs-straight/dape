@@ -1175,10 +1175,16 @@ See `dape--connection-selected'."
 
 (defun dape--live-connections ()
   "Get all live connections."
-  (when (and dape--connection (jsonrpc-running-p dape--connection))
-    (cons dape--connection
-          (seq-filter 'jsonrpc-running-p
-                      (reverse (dape--children dape--connection))))))
+  (cl-labels ((live-connections-1 (conn)
+                (when (and conn (jsonrpc-running-p conn))
+                  (cons conn
+                        (mapcan #'live-connections-1
+                                ;; New children are `push'ed onto the
+                                ;; children list, therefore children
+                                ;; are `reverse'd to guarantee LIFO
+                                ;; order.
+                                (reverse (dape--children conn)))))))
+    (live-connections-1 dape--connection)))
 
 (defclass dape-connection (jsonrpc-process-connection)
   ((last-id
@@ -2030,9 +2036,10 @@ symbol `dape-connection'."
           'dape-repl-error-face)
          ;; barf connection stderr
          (when-let* ((proc (jsonrpc--process conn))
-                     (buffer (process-get proc 'jsonrpc-stderr)))
-           (with-current-buffer buffer
-             (dape--repl-message (buffer-string) 'dape-repl-error-face)))
+                     (buffer (process-get proc 'jsonrpc-stderr))
+                     ((buffer-live-p buffer))
+                     (stderr (with-current-buffer buffer (buffer-string))))
+           (dape--repl-message stderr 'dape-repl-error-face))
          ;; barf server stderr
          (when-let* ((server-proc (dape--server-process conn))
                      (buffer (process-get server-proc 'stderr-buffer)))
