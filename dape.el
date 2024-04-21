@@ -1226,6 +1226,9 @@ See `dape--connection-selected'."
    (state
     :accessor dape--state :initform nil
     :documentation "Session state.")
+   (state-reason
+    :accessor dape--state-reason :initform nil
+    :documentation "Reason for state.")
    (exception-description
     :accessor dape--exception-description :initform nil
     :documentation "Exception description.")
@@ -1497,7 +1500,7 @@ See `dape-request' for expected CB signature."
 (defun dape--update-threads (conn cb)
   "Update threads for CONN in-place if possible.
 See `dape-request' for expected CB signature."
-  ;; TODO Should debouce these request as they really flood the pipe
+  ;; TODO Should de-bounce these request as they really flood the pipe
   ;;      when triggered from "thread" event.
   (dape--with-request-bind
       ((&key threads &allow-other-keys) error)
@@ -1834,7 +1837,7 @@ Sets `dape--thread-id' from BODY and invokes ui refresh with
       (&key threadId reason allThreadsStopped hitBreakpointIds
             &allow-other-keys)
       body
-    (dape--update-state conn 'stopped)
+    (dape--update-state conn 'stopped reason)
     (dape--maybe-select-thread conn threadId 'force)
     ;; Reset stack id to force a new frame in
     ;; `dape--current-stack-frame'.
@@ -1842,19 +1845,16 @@ Sets `dape--thread-id' from BODY and invokes ui refresh with
           ;; Reset exception description
           (dape--exception-description conn) nil)
     ;; Important to do this before `dape--update' to be able to setup
-    (pcase reason
-      ;; Output exception info in overlay and repl
-      ("exception"
-       (let* ((texts
-               (seq-filter 'stringp
-                           (list (plist-get body :text)
-                                 (plist-get body :description))))
-              (str (mapconcat 'identity texts ":\n\t")))
-         (setf (dape--exception-description conn) str)
-         (dape--repl-message str 'dape-repl-error-face)))
-      (_
-       ;; TODO Would be nice to display other `reasons'
-       ))
+    ;; breakpoints description.
+    (when (equal reason "exception")
+      ;; Output exception info in overlay and REPL
+      (let* ((texts
+              (seq-filter 'stringp
+                          (list (plist-get body :text)
+                                (plist-get body :description))))
+             (str (mapconcat 'identity texts ":\n\t")))
+        (setf (dape--exception-description conn) str)
+        (dape--repl-message str 'dape-repl-error-face)))
     ;; Update breakpoints hits
     (dape--breakpoints-stopped hitBreakpointIds)
     ;; Update `dape--threads'
@@ -3699,8 +3699,6 @@ current buffer with CONN config."
 
 (dape--command-at-line dape-info-sources-goto (dape--info-source)
   "Goto source."
-  ;; TODO Should be storing connection in `dape--info-source' instead of
-  ;;      guessing
   (let ((conn (dape--live-connection 'last t))
         (source (list :source dape--info-source)))
     (dape--with-request (dape--source-ensure conn source)
@@ -4205,112 +4203,82 @@ Send INPUT to DUMMY-PROCESS."
 
 (defun dape--repl-completion-at-point ()
   "Completion at point function for *dape-repl* buffer."
-  ;; FIXME still not 100% it's functional
-  ;;       - compleation is messed up if point is in text and
-  ;;         compleation is triggered
-  ;;       - compleation is done on whole line for `debugpy'
-  (when (or (symbol-at-point)
-            (member (buffer-substring-no-properties (1- (point)) (point))
-                    (or (thread-first (dape--live-connection 'last t)
-                                      (dape--capabilities)
-                                      (plist-get :completionTriggerCharacters)
-                                      (append nil))
-                        '("."))))
-    (let* ((bounds (save-excursion
-                     (cons (and (skip-chars-backward "^\s")
-                                (point))
-                           (and (skip-chars-forward "^\s")
-                                (point)))))
-           (column (1+ (- (cdr bounds) (car bounds))))
-           (str (buffer-substring-no-properties
-                 (car bounds)
-                 (cdr bounds)))
-           (collection
-            ;; Add `dape-repl-commands' only if completion starts at
-            ;; `bolp' as `dape-repl-commands' is only valid if input
-            ;; `equals' command key.
-            (when (eql (car bounds) (line-beginning-position))
-              (mapcar (lambda (cmd)
-                        (cons (car cmd)
-                              (format " %s"
-                                      (propertize (symbol-name (cdr cmd))
-                                                  'face 'font-lock-builtin-face))))
-                      (append dape-repl-commands
-                              (when dape-repl-use-shorthand
-                                (dape--repl-shorthand-alist))))))
-           done)
-      (list
-       (car bounds)
-       (cdr bounds)
-       (completion-table-dynamic
-        (lambda (_str)
-          (when-let ((conn (or (dape--live-connection 'stopped t)
-                               (dape--live-connection 'last t))))
-            (dape--with-request-bind
-                ((&key targets &allow-other-keys) _error)
-                (dape-request conn
-                              "completions"
-                              (append
-                               (when (dape--stopped-threads conn)
-                                 (list :frameId
-                                       (plist-get (dape--current-stack-frame conn) :id)))
-                               (list
-                                :text str
-                                :column column
-                                :line 1)))
-              (setq collection
-                    (append
-                     collection
-                     (mapcar
-                      (lambda (target)
-                        (cons
-                         (cond
-                          ((plist-get target :text)
-                           (plist-get target :text))
-                          ((and (plist-get target :label)
-                                (plist-get target :start))
-                           (let ((label (plist-get target :label))
-                                 (start (plist-get target :start)))
-                             (concat (substring str 0 start)
-                                     label
-                                     (substring str
-                                                (thread-first
-                                                  target
-                                                  (plist-get :length)
-                                                  (+ 1 start)
-                                                  (min (length str)))))))
-                          ((and (plist-get target :label)
-                                (memq (aref str (1- (length str))) '(?. ?/ ?:)))
-                           (concat str (plist-get target :label)))
-                          ((and (plist-get target :label)
-                                (length> (plist-get target :label)
-                                         (length str)))
+  (let* ((bounds (or (bounds-of-thing-at-point 'word)
+                     (cons (point) (point))))
+         (trigger-chars
+          (or (thread-first (dape--live-connection 'last t)
+                            (dape--capabilities)
+                            ;; completionTriggerCharacters is an
+                            ;; unofficial array of string to trigger
+                            ;; completion on.
+                            (plist-get :completionTriggerCharacters)
+                            (append nil))
+              '(".")))
+         (collection
+          ;; Add `dape-repl-commands' only if completion starts at
+          ;; beginning of prompt line.
+          (when (eql (comint-line-beginning-position)
+                     (car bounds))
+            (mapcar (lambda (cmd)
+                      (cons (car cmd)
+                            (format " %s"
+                                    (propertize (symbol-name (cdr cmd))
+                                                'face 'font-lock-builtin-face))))
+                    (append dape-repl-commands
+                            (when dape-repl-use-shorthand
+                              (dape--repl-shorthand-alist))))))
+         (line-start (comint-line-beginning-position))
+         (str (buffer-substring-no-properties line-start (point-max)))
+         ;; Point in `str'
+         (column (1+ (- (point) line-start)))
+         done)
+    (list
+     (car bounds)
+     (cdr bounds)
+     (completion-table-dynamic
+      (lambda (_str)
+        (when-let* ((conn (or (dape--live-connection 'stopped t)
+                              (dape--live-connection 'last t)))
+                    ((dape--capable-p conn :supportsCompletionsRequest)))
+          (dape--with-request-bind
+              ((&key targets &allow-other-keys) _error)
+              (dape-request conn
+                            "completions"
+                            (append
+                             (when (dape--stopped-threads conn)
+                               (list :frameId
+                                     (plist-get (dape--current-stack-frame conn) :id)))
+                             (list
+                              :text str
+                              :column column)))
+            (setq collection
+                  (append
+                   collection
+                   (mapcar
+                    (lambda (target)
+                      (cons
+                       (or (plist-get target :text)
                            (plist-get target :label))
-                          ((and (plist-get target :label)
-                                (length> (plist-get target :label)
-                                         (length str)))
-                           (cl-loop with label = (plist-get target :label)
-                                    for i downfrom (1- (length label)) downto 1
-                                    when (equal (substring str (- (length str) i))
-                                                (substring label 0 i))
-                                    return (concat str (substring label i))
-                                    finally return label)))
-                         (when-let ((type (plist-get target :type)))
-                           (format " %s"
-                                   (propertize type
-                                               'face 'font-lock-type-face)))))
-                      targets)))
-              (setf done t))
-            (while-no-input
-              (while (not done)
-                (accept-process-output nil 0 1))))
-          collection))
-       :annotation-function
-       (lambda (str)
-         (when-let ((annotation
-                     (alist-get (substring-no-properties str) collection
-                                nil nil 'equal)))
-           annotation))))))
+                       (concat (when-let ((type (plist-get target :type)))
+                                 (format " %s" (propertize type 'face 'font-lock-type-face)))
+                               (when-let ((detail (plist-get target :detail)))
+                                 (format " %s" (propertize detail 'face 'font-lock-doc-face))))))
+                    targets)))
+            (setf done t))
+          (while-no-input
+            (while (not done)
+              (accept-process-output nil 0 1))))
+        collection))
+     :annotation-function
+     (lambda (str)
+       (when-let ((annotation
+                   (alist-get (substring-no-properties str) collection
+                              nil nil 'equal)))
+         annotation))
+     :company-prefix-length
+     (save-excursion
+       (goto-char (car bounds))
+       (looking-back (regexp-opt trigger-chars) line-start)))))
 
 (defvar dape-repl-mode nil)
 
@@ -4806,9 +4774,10 @@ See `eldoc-documentation-functions', for more infomation."
 
 ;;; Mode line
 
-(defun dape--update-state (conn state)
+(defun dape--update-state (conn state &optional reason)
   "Update Dape mode line with STATE symbol for adapter CONN."
   (setf (dape--state conn) state)
+  (setf (dape--state-reason conn) reason)
   (force-mode-line-update t))
 
 (defun dape--mode-line-format ()
@@ -4821,6 +4790,9 @@ See `eldoc-documentation-functions', for more infomation."
              (format "%s" (or (and conn (dape--state conn))
                               'unknown))
              'face 'font-lock-doc-face)
+            (when-let ((reason (and conn (dape--state-reason conn))))
+              (format "/%s" (propertize reason
+                                        'face 'font-lock-doc-face)))
             (when-let* ((conns (dape--live-connections))
                         (nof-conns
                          (length (cl-remove-if-not 'dape--threads conns)))
