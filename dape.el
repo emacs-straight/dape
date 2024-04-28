@@ -712,10 +712,11 @@ Non interactive global minor mode."
 (defmacro dape--with-request-bind (vars fn-args &rest body)
   "Call FN with ARGS and execute BODY on callback with VARS bound.
 VARS are bound from the args that the callback was invoked with.
-FN-ARGS is be an cons pair as FN . ARGS, where FN is exected to
+FN-ARGS is be an cons pair as FN . ARGS, where FN is expected to
 take an function as an argument at ARGS + 1.
-BODY is guaranteed to be evaluated with the current buffer.
-See `cl-destructuring-bind'."
+BODY is guaranteed to be evaluated with the current buffer if it's
+still live.
+See `cl-destructuring-bind' for bind forms."
   (declare (indent 2))
   (let ((old-buffer (make-symbol "old-buffer")))
     `(let ((,old-buffer (current-buffer)))
@@ -729,8 +730,9 @@ See `cl-destructuring-bind'."
 (defmacro dape--with-request (fn-args &rest body)
   "Call `dape-request' like FN with ARGS and execute BODY on callback.
 FN-ARGS is be an cons pair as FN . ARGS.
-BODY is guaranteed to be evaluated with the current buffer.
-See `dape--with-request-bind'."
+BODY is guaranteed to be evaluated with the current buffer if it's
+still live.
+See `cl-destructuring-bind' for bind forms."
   (declare (indent 1))
   `(dape--with-request-bind (&rest _) ,fn-args ,@body))
 
@@ -738,6 +740,27 @@ See `dape--with-request-bind'."
   "Shorthand to call CB with ERROR in an `dape-request' like way."
   (when (functionp cb)
     (funcall cb nil error)))
+
+(defun dape--call-with-debounce (timer backoff fn)
+  "Call FN with a debounce of BACKOFF seconds.
+This function utilizes TIMER to store state.  It cancels the TIMER
+and schedules FN to run after current time + BACKOFF seconds.
+If BACKOFF is non-zero, FN will be evaluated within timer context."
+  (cond
+   ((zerop backoff)
+    (cancel-timer timer)
+    (funcall fn))
+   (t
+    (cancel-timer timer)
+    (timer-set-time timer (timer-relative-time nil backoff))
+    (timer-set-function timer fn)
+    (timer-activate timer))))
+
+(defmacro dape--with-debounce (timer backoff &rest body)
+  "Eval BODY forms with a debounce of BACKOFF seconds using TIMER.
+Helper macro for `dape--call-with-debounce'."
+  (declare (indent 2))
+  `(dape--call-with-debounce ,timer ,backoff (lambda () ,@body)))
 
 (defun dape--next-like-command (conn command)
   "Helper for interactive step like commands.
@@ -753,6 +776,9 @@ Run step like COMMAND on CONN.  If ARG is set run COMMAND ARG times."
                             (list :granularity
                                   (symbol-name dape-stepping-granularity)))))
       (unless error
+        ;; FIXME This is known to mess up state, needs some thorough
+        ;;       testing before removed,  state should be handled by
+        ;;       event not request responses.
         (dape--update-state conn 'running)
         (dape--remove-stack-pointers)
         (dape--threads-set-status conn nil t 'running)
@@ -1426,32 +1452,33 @@ See `dape-request' for expected CB signature."
                    :path (dape--path conn (buffer-file-name buffer) 'remote)))))))
     (dape--with-request-bind
         ((&key breakpoints &allow-other-keys) error)
-        (dape-request conn
-                      "setBreakpoints"
-                      (list
-                       :source source
-                       :breakpoints
-                       (cl-map 'vector
-                               (lambda (overlay line)
-                                 (let (plist it)
-                                   (setq plist (list :line line))
-                                   (cond
-                                    ((setq it (overlay-get overlay :log))
-                                     (if (dape--capable-p conn :supportsLogPoints)
-                                         (setq plist (plist-put plist :logMessage it))
-                                       (dape--repl-message "* Adapter does not support log breakpoints *")))
-                                    ((setq it (overlay-get overlay :expression))
-                                     (if (dape--capable-p conn :supportsConditionalBreakpoints)
-                                         (setq plist (plist-put plist :condition it))
-                                       (dape--repl-message "* Adapter does not support expression breakpoints *")))
-                                    ((setq it (overlay-get overlay :hits))
-                                     (if (dape--capable-p conn :supportsHitConditionalBreakpoints)
-                                         (setq plist (plist-put plist :hitCondition it))
-                                       (dape--repl-message "* Adapter does not support hits breakpoints *"))))
-                                   plist))
-                               overlays
-                               lines)
-                       :lines (apply 'vector lines)))
+        (dape-request
+         conn
+         "setBreakpoints"
+         (list
+          :source source
+          :breakpoints
+          (cl-map 'vector
+                  (lambda (overlay line)
+                    (let (plist it)
+                      (setq plist (list :line line))
+                      (cond
+                       ((setq it (overlay-get overlay :log))
+                        (if (dape--capable-p conn :supportsLogPoints)
+                            (setq plist (plist-put plist :logMessage it))
+                          (dape--repl-message "* Adapter does not support log breakpoints *")))
+                       ((setq it (overlay-get overlay :expression))
+                        (if (dape--capable-p conn :supportsConditionalBreakpoints)
+                            (setq plist (plist-put plist :condition it))
+                          (dape--repl-message "* Adapter does not support expression breakpoints *")))
+                       ((setq it (overlay-get overlay :hits))
+                        (if (dape--capable-p conn :supportsHitConditionalBreakpoints)
+                            (setq plist (plist-put plist :hitCondition it))
+                          (dape--repl-message "* Adapter does not support hits breakpoints *"))))
+                      plist))
+                  overlays
+                  lines)
+          :lines (apply 'vector lines)))
       (cl-loop for breakpoint across breakpoints
                for overlay in overlays
                do (dape--breakpoint-update conn overlay breakpoint))
@@ -2515,6 +2542,7 @@ Using BUFFER and STR."
 
 (defun dape--memory-revert (&optional _ignore-auto _noconfirm _preserve-modes)
   "Revert buffer function for `dape-memory-mode'."
+  ;; TODO Add `dape--with-debounce'
   (let* ((conn (dape--live-connection 'last))
          (write-capable-p (dape--capable-p conn :supportsWriteMemoryRequest)))
     (unless (dape--capable-p conn :supportsReadMemoryRequest)
@@ -2752,8 +2780,9 @@ contents."
 
 (defun dape--breakpoints-reset ()
   "Reset breakpoints hits."
-  (cl-loop for ov in dape--breakpoints
-           do (overlay-put ov 'dape-hits nil)))
+  (cl-loop for ov in dape--breakpoints do
+           (overlay-put ov 'dape-verified-plist nil)
+           (overlay-put ov 'dape-hits nil)))
 
 (defun dape--breakpoints-stopped (hit-breakpoint-ids)
   "Increment `dape-hits' from array of HIT-BREAKPOINT-IDS."
@@ -2874,9 +2903,6 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
     (delete-overlay overlay)
     (unless skip-update
       (dolist (conn (dape--live-connections))
-        ;; FIXME If breakpoints stick for one connections but fails
-        ;;       for another in the same tree connection tree, keep the
-        ;;       breakpoint verified
         (dape--set-breakpoints-in-buffer conn buffer)))
     (dape--margin-cleanup buffer))
   ;; If we have an stopped connection we also have an stack pointer
@@ -2891,7 +2917,9 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
   (let ((id (plist-get breakpoint :id))
         (verified (eq (plist-get breakpoint :verified) t)))
     (overlay-put overlay 'dape-id id)
-    (overlay-put overlay 'dape-verified verified)
+    (overlay-put overlay 'dape-verified-plist
+                 (plist-put (overlay-get overlay 'dape-verified-plist)
+                            conn verified))
     (run-hooks 'dape-update-ui-hooks))
   (when-let* ((old-buffer (overlay-buffer overlay))
               (old-line (with-current-buffer old-buffer
@@ -3168,6 +3196,22 @@ REVERSED selects previous."
   (when (derived-mode-p 'dape-info-parent-mode)
     (ignore-errors (revert-buffer))))
 
+;; TODO Should maybe be a custom
+(defvar dape--info-debounce-time 0.1
+  "Number of seconds to debounce `revert-buffer' of info buffers.")
+
+(defvar-local dape--info-debounce-timer nil
+  "Debounce context for `dape-info-parent-mode' buffers.")
+
+(cl-defmethod dape--info-revert :around (&rest _)
+  "Wrap `dape--info-revert' methods within an debounce context.
+Each buffers store its own debounce context."
+  (let ((buffer (current-buffer)))
+    (dape--with-debounce dape--info-debounce-timer dape--info-debounce-time
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (cl-call-next-method))))))
+
 (define-derived-mode dape-info-parent-mode special-mode ""
   "Generic mode to derive all other Dape gud buffer modes from."
   :interactive nil
@@ -3178,6 +3222,7 @@ REVERSED selects previous."
   (setq-local buffer-read-only t
               truncate-lines t
               cursor-in-non-selected-windows nil
+              dape--info-debounce-timer (timer-create)
               ;; FIXME Is `revert-buffer-in-progress-p' is not
               ;;       respected as most of the work is done in an
               ;;       callback.
@@ -3220,33 +3265,38 @@ Header line is custructed from buffer local
             " "))
          dape--info-buffer-related)))
 
-(defun dape--info-call-update-with (fn &optional buffer)
+(defun dape--info-call-update-with (fn)
   "Helper for `dape--info-revert' functions.
 Erase BUFFER content and updates `header-line-format'.
 FN is expected to update insert buffer contents, update
 `dape--info-buffer-related' and `header-line-format'."
-  (setq buffer (or buffer (current-buffer)))
-  (with-current-buffer buffer
-    (unless (derived-mode-p 'dape-info-parent-mode)
-      (error "Trying to update non info buffer"))
-    ;; Would be nice with replace-buffer-contents
-    ;; But it seams to messes up string properties
-    (let ((line (line-number-at-pos (point) t))
-          (old-window (selected-window)))
-      ;; Still don't know any better way of keeping window scroll?
-      (when-let ((window (get-buffer-window buffer)))
-        (select-window window))
-      (save-window-excursion
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (funcall fn))
-        (ignore-errors
-          (goto-char (point-min))
-          (forward-line (1- line)))
-        (dape--info-set-related-buffers)
-        (dape--info-set-header-line-format))
-      (when old-window
-        (select-window old-window)))))
+  ;; Save buffer as `select-window' sets buffer
+  (save-current-buffer
+    ;; FIXME: This guarantees that only info buffers are erased if
+    ;;        something unexpected happens with the current-buffer.
+    ;;        If buffer is killed while waiting for an response in
+    ;;        an caller of this function current-buffer *will* change
+    ;;        and another dape info buffer will be reused for this
+    ;;        update and that is not correct.
+    (when (derived-mode-p 'dape-info-parent-mode)
+      ;; Would be nice with replace-buffer-contents
+      ;; But it seams to messes up string properties
+      (let ((line (line-number-at-pos (point) t))
+            (old-window (selected-window)))
+        ;; Still don't know any better way of keeping window scroll?
+        (when-let ((window (get-buffer-window)))
+          (select-window window))
+        (save-window-excursion
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (funcall fn))
+          (ignore-errors
+            (goto-char (point-min))
+            (forward-line (1- line)))
+          (dape--info-set-related-buffers)
+          (dape--info-set-header-line-format))
+        (when old-window
+          (select-window old-window))))))
 
 (defmacro dape--info-update-with (&rest body)
   "Create an update function from BODY.
@@ -3430,35 +3480,39 @@ displayed."
         (when-let* ((buffer (overlay-buffer breakpoint))
                     (line (with-current-buffer buffer
                             (line-number-at-pos (overlay-start breakpoint)))))
-          (gdb-table-add-row
-           table
-           `(,(if (overlay-get breakpoint 'dape-verified)
-                  (propertize "y" 'font-lock-face font-lock-warning-face)
-                "n")
-             ,(concat
-               (if-let (file (buffer-file-name buffer))
-                   (dape--format-file-line file line)
-                 (buffer-name buffer))
-               (with-current-buffer buffer
-                 (save-excursion
-                   (goto-char (overlay-start breakpoint))
-                   (truncate-string-to-width
-                    (concat " " (string-trim (thing-at-point 'line)))
-                    dape-info-breakpoint-source-line-width))))
-             ,(when with-hits-p
-                (if-let ((hits (overlay-get breakpoint 'dape-hits)))
-                    (format "%s" hits)
-                  ""))
-             ,(when-let ((after-string (overlay-get breakpoint 'after-string)))
-                (substring after-string 1)))
-           (append
-            (unless (overlay-get breakpoint 'dape-verified)
-              '(face shadow))
-            (list
-             'dape--info-breakpoint breakpoint
-             'keymap dape-info-breakpoints-line-map
-             'mouse-face 'highlight
-             'help-echo "mouse-2, RET: visit breakpoint")))))
+          (let* ((verified-plist (overlay-get breakpoint 'dape-verified-plist))
+                 (verified-p (cl-find-if (lambda (conn)
+                                           (plist-get verified-plist conn))
+                                         (dape--live-connections))))
+            (gdb-table-add-row
+             table
+             `(,(if verified-p
+                    (propertize "y" 'font-lock-face font-lock-warning-face)
+                  "n")
+               ,(concat
+                 (if-let (file (buffer-file-name buffer))
+                     (dape--format-file-line file line)
+                   (buffer-name buffer))
+                 (with-current-buffer buffer
+                   (save-excursion
+                     (goto-char (overlay-start breakpoint))
+                     (truncate-string-to-width
+                      (concat " " (string-trim (thing-at-point 'line)))
+                      dape-info-breakpoint-source-line-width))))
+               ,(when with-hits-p
+                  (if-let ((hits (overlay-get breakpoint 'dape-hits)))
+                      (format "%s" hits)
+                    ""))
+               ,(when-let ((after-string (overlay-get breakpoint 'after-string)))
+                  (substring after-string 1)))
+             (append
+              (unless verified-p
+                '(face shadow))
+              (list
+               'dape--info-breakpoint breakpoint
+               'keymap dape-info-breakpoints-line-map
+               'mouse-face 'highlight
+               'help-echo "mouse-2, RET: visit breakpoint"))))))
       (dolist (exception dape--exceptions)
         (gdb-table-add-row
          table
