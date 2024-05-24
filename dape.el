@@ -1916,6 +1916,10 @@ Stores `dape--thread-id' and updates/adds thread in
   (cl-destructuring-bind (&key threadId reason &allow-other-keys)
       body
     (when (equal reason "started")
+      ;; For adapters that does not send an continued request use
+      ;; thread started as an way to switch from `initialized' to
+      ;; running.
+      (dape--update-state conn 'running)
       (dape--maybe-select-thread conn (plist-get body :threadId) nil))
     (let ((update-handle
            ;; Need to store handle before threads request to guard
@@ -2130,17 +2134,23 @@ symbol `dape-connection'."
        ;; error prints
        (unless (dape--initialized-p conn)
          (dape--repl-message
-          (concat "Adapter "
+          (concat "* Adapter "
                   (when (dape--parent conn)
                     "child ")
-                  "connection shutdown without successfully initializing")
+                  "connection shutdown without successfully initializing *")
           'dape-repl-error-face)
          ;; barf config
          (dape--repl-message
           (format "Configuration:\n%s"
                   (cl-loop for (key value) on (dape--config conn) by 'cddr
+                           unless (eq key '(ensure modes))
                            concat (format "  %s %S\n" key value)))
           'dape-repl-error-face)
+         ;; barf connection stdout
+         (when-let* ((proc (jsonrpc--process conn))
+                     (buffer (process-buffer proc))
+                     ((buffer-live-p buffer)))
+           (dape--repl-message (with-current-buffer buffer (buffer-string))))
          ;; barf connection stderr
          (when-let* ((proc (jsonrpc--process conn))
                      (buffer (process-get proc 'jsonrpc-stderr))
