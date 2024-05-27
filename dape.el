@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.11.1
+;; Version: 0.12.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -620,12 +620,6 @@ See `dape--default-cwd'."
   "Hook run after dape compilation succeeded.
 The hook is run with one argument, the compilation buffer."
   :type 'hook)
-
-(defcustom dape-eldoc-variable-expand 1
-  "Levels of variable expansion in `eldoc-doc-buffer'.
-Note: Expanding variable levels above 1 might have an noticeable
-performance hit."
-  :type 'natnum)
 
 (defcustom dape-minibuffer-hint-ignore-properties
   '(ensure fn modes command command-args :type :request)
@@ -3326,7 +3320,7 @@ with HELP-ECHO string, MOUSE-FACE and FACE."
 
 (defun dape--info-set-header-line-format ()
   "Helper for dape info buffers to set header line.
-Header line is custructed from buffer local
+Header line is constructed from buffer local
 `dape--info-buffer-related'."
   (setq header-line-format
         (mapcan
@@ -5203,35 +5197,27 @@ See `dape--config-mode-p' how \"valid\" is defined."
   "Hook function to produce doc strings for `eldoc'.
 On success calls CB with the doc string.
 See `eldoc-documentation-functions', for more information."
-  (cl-flet ((expand-p (path &optional object)
-              (and (not (eq (plist-get object :expensive) t))
-                   (length< path dape-eldoc-variable-expand))))
-    (and-let* ((conn (dape--live-connection 'last t))
-               ((dape--capable-p conn :supportsEvaluateForHovers))
-               (symbol (thing-at-point 'symbol)))
-      (dape--with-request-bind
-          (body error)
-          (dape--evaluate-expression conn
-                                     (plist-get (dape--current-stack-frame conn) :id)
-                                     (substring-no-properties symbol)
-                                     "hover")
-        (unless error
-          (let ((table (make-gdb-table)))
-            (setf (gdb-table-right-align table)
-                  dape-info-variable-table-aligned)
-            (dape--with-request (dape--variables conn body)
-              (dape--with-request (dape--variables-recursive conn body nil #'expand-p)
-                (dape--info-scope-add-variable table body 'watch '(_) #'expand-p nil)
-                (funcall cb (gdb-table-string table " ")
-                         :thing symbol
-                         :face 'font-lock-variable-name-face
-                         :echo (format "%s %s"
-                                       (or (plist-get body :value)
-                                           (plist-get body :result)
-                                           "")
-                                       (or (plist-get body :type)
-                                           ""))))))))))
-  t)
+       (and-let* ((conn (dape--live-connection 'last t))
+                  ((dape--capable-p conn :supportsEvaluateForHovers))
+                  (symbol (thing-at-point 'symbol)))
+         (dape--with-request-bind
+             (body error)
+             (dape--evaluate-expression conn
+                                        (plist-get (dape--current-stack-frame conn) :id)
+                                        (substring-no-properties symbol)
+                                        "hover")
+           (unless error
+             (funcall cb
+                      (format "%s %s"
+                              (or (plist-get body :value)
+                                  (plist-get body :result)
+                                  "")
+                              (propertize
+                               (or (plist-get body :type) "")
+                               'face 'font-lock-type-face))
+                      :thing symbol
+                      :face 'font-lock-variable-name-face))))
+       t)
 
 (defun dape--add-eldoc-hook ()
   "Add `dape-hover-function' from eldoc hook."
@@ -5248,32 +5234,37 @@ See `eldoc-documentation-functions', for more information."
   "Update Dape mode line with STATE symbol for adapter CONN."
   (setf (dape--state conn) state)
   (setf (dape--state-reason conn) reason)
+  (dape--mode-line-format)
   (force-mode-line-update t))
 
+(defvar dape--mode-line-format nil
+  "Dape mode line format.")
+
+(put 'dape--mode-line-format 'risky-local-variable t)
+
 (defun dape--mode-line-format ()
-  "Format Dape mode line."
+  "Update `dape--mode-line-format' format."
   (let ((conn (or (dape--live-connection 'last t)
                   dape--connection)))
-    (concat (propertize "dape" 'face 'font-lock-constant-face)
+    (setq dape--mode-line-format
+          `((:propertize "dape"
+                         face font-lock-constant-face)
             ":"
-            (propertize
-             (format "%s" (or (and conn (dape--state conn))
-                              'unknown))
-             'face 'font-lock-doc-face)
-            (when-let ((reason (and conn (dape--state-reason conn))))
-              (format "/%s" (propertize reason
-                                        'face 'font-lock-doc-face)))
-            (when-let* ((conns (dape--live-connections))
-                        (nof-conns
-                         (length (cl-remove-if-not 'dape--threads conns)))
-                        ((> nof-conns 1)))
-              (propertize (format "(%s)" nof-conns)
-                          'face 'shadow
-                          'help-echo "Active child connections")))))
+            (:propertize ,(format "%s" (or (and conn (dape--state conn))
+                                           'unknown))
+                         face font-lock-doc-face)
+            ,@(when-let ((reason (and conn (dape--state-reason conn))))
+                `("/" (:propertize ,reason face font-lock-doc-face)))
+            ,@(when-let* ((conns (dape--live-connections))
+                          (nof-conns
+                           (length (cl-remove-if-not 'dape--threads conns)))
+                          ((> nof-conns 1)))
+                `((:propertize ,(format "(%s)" nof-conns)
+                               face shadow
+                               help-echo "Active child connections")))))))
 
 (add-to-list 'mode-line-misc-info
-             `(dape-active-mode
-               (" [" (:eval (dape--mode-line-format)) "] ")))
+             `(dape-active-mode ("[" dape--mode-line-format "]")))
 
 
 ;;; Keymaps
