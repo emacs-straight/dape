@@ -1040,13 +1040,10 @@ as is."
   "Ensure that `command' from CONFIG exist system."
   (dape--ensure-executable (dape-config-get config 'command)))
 
-(defun dape--overlay-region (&optional extended)
-  "List of beg and end of current line.
-If EXTENDED end of line is after newline."
+(defun dape--overlay-region ()
+  "List of beg and end of current line."
   (list (line-beginning-position)
-        (if extended
-            (line-beginning-position 2)
-          (1- (line-beginning-position 2)))))
+        (1- (line-beginning-position 2))))
 
 (defun dape--format-file-line (file line)
   "Formats FILE and LINE to string."
@@ -2443,12 +2440,20 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
   "Selected current stack for adapter CONN by STACK-ID."
   (interactive
    (let* ((conn (dape--live-connection 'stopped))
+          (current-thread (dape--current-thread conn))
           (collection
-           (mapcar (lambda (stack) (cons (plist-get stack :name)
-                                         (plist-get stack :id)))
-                   (thread-first conn
-                                 (dape--current-thread)
-                                 (plist-get :stackFrames))))
+           (let (done)
+             ;; Need to fetch all frames as might only have 1 frame
+             ;; fetches see `dape--stack-trace' and
+             ;; `:supportsDelayedStackTraceLoading'.
+             (dape--with-request
+                 (dape--stack-trace conn current-thread dape-stack-trace-levels)
+               (setf done t))
+             (with-timeout (5 nil)
+               (while (not done) (accept-process-output nil 0.1)))
+             (mapcar (lambda (stack) (cons (plist-get stack :name)
+                                           (plist-get stack :id)))
+                     (plist-get current-thread :stackFrames))))
           (stack-name
            (completing-read (format "Select stack (current %s): "
                                     (thread-first conn
@@ -2853,9 +2858,7 @@ contents."
 
 (defun dape--breakpoint-freeze (overlay _after _begin _end &optional _len)
   "Make sure that dape OVERLAY region covers line."
-  (apply 'move-overlay overlay
-         (dape--overlay-region (eq (overlay-get overlay 'category)
-                                   'dape-stack-pointer))))
+  (apply 'move-overlay overlay (dape--overlay-region)))
 
 (defun dape--breakpoints-reset ()
   "Reset breakpoints hits."
@@ -3688,7 +3691,9 @@ See `dape-request' for expected CB signature."
         (dolist (thread threads)
           ;; HACK Keep track of requests in flight as `revert-buffer'
           ;;      might be called at any time, and we want keep
-          ;;      uneasy chatter at a minimum.
+          ;;      unnecessary chatter at a minimum.
+          ;; NOTE This is hack is still necessary if user sets
+          ;;      `dape-ui-debounce-time' to 0.0.
           (plist-put thread :request-in-flight t)
           (dape--with-request (dape--stack-trace conn thread 1)
             (plist-put thread :request-in-flight nil)
@@ -3872,9 +3877,8 @@ current buffer with CONN config."
       ;; Start off with shoving available stack info into buffer
       (dape--info-update-with
         (dape--info-stack-buffer-insert conn current-stack-frame stack-frames))
-      (dape--with-request (dape--stack-trace conn
-                                             current-thread
-                                             dape-stack-trace-levels)
+      (dape--with-request
+          (dape--stack-trace conn current-thread dape-stack-trace-levels)
         ;; If stack trace lookup with `dape-stack-trace-levels' frames changed
         ;; the stack frame list, we need to update the buffer again
         (unless (eq stack-frames (plist-get current-thread :stackFrames))
@@ -5316,7 +5320,10 @@ See `eldoc-documentation-functions', for more information."
                dape-breakpoint-remove-all
                dape-stack-select-up
                dape-stack-select-down
-               dape-watch-dwim))
+               dape-select-stack
+               dape-select-thread
+               dape-watch-dwim
+               dape-evaluate-expression))
   (put cmd 'repeat-map 'dape-global-map))
 
 (when dape-key-prefix (global-set-key dape-key-prefix dape-global-map))
