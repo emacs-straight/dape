@@ -2088,9 +2088,13 @@ symbol `dape-connection'."
           (setq retries (1- retries)))
         (if (zerop retries)
             (progn
-              (dape--repl-message (format "Unable to connect to server %s:%d"
+              (dape--repl-message (format "* Unable to connect to dap server at %s:%d *"
                                           host (plist-get config 'port))
                                   'dape-repl-error-face)
+              (dape--repl-message
+               (format "* Connection is configurable by %s and %s keys *"
+                       (propertize "host" 'font-lock-face 'font-lock-keyword-face)
+                       (propertize "port" 'font-lock-face 'font-lock-keyword-face)))
               ;; barf server std-err
               (when-let ((buffer
                           (and server-process
@@ -2434,7 +2438,8 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
      (alist-get thread-name collection nil nil 'equal)))
   (setf (dape--thread-id conn) thread-id)
   (setq dape--connection-selected conn)
-  (dape--update conn t))
+  (dape--update conn t)
+  (dape--mode-line-format))
 
 (defun dape-select-stack (conn stack-id)
   "Selected current stack for adapter CONN by STACK-ID."
@@ -3598,7 +3603,7 @@ displayed."
                (save-excursion
                  (goto-char (overlay-start breakpoint))
                  (truncate-string-to-width
-                  (concat " " (string-trim (thing-at-point 'line)))
+                  (concat " " (string-trim (or (thing-at-point 'line) "")))
                   dape-info-breakpoint-source-line-max))))
             (when-let* (with-hits-p
                         (hits (overlay-get breakpoint 'dape-hits)))
@@ -4727,48 +4732,43 @@ Update `dape--inlay-hint-overlays' from SCOPES."
                              do
                              (setcdr cons (list value updated-p))
                              (setf symbols (delq cons symbols)))))
-  (cl-loop for inlay-hint in dape--inlay-hint-overlays
-           when (overlayp inlay-hint) do
-           (cl-loop with symbols = (overlay-get inlay-hint 'dape-symbols)
-                    for (symbol value update) in  symbols
-                    when value
-                    collect
-                    (format
-                     "%s %s"
-                     (propertize
-                      (format "%s:" symbol)
-                      'face 'dape-inlay-hint-face
-                     'mouse-face 'highlight
-                     'keymap
-                     (let ((map (make-sparse-keymap))
-                           (sym symbol))
-                       (define-key map [mouse-1]
-                                   (lambda (event)
-                                     (interactive "e")
-                                     (save-selected-window
-                                       (let ((start (event-start event)))
-                                         (select-window (posn-window start))
-                                         (save-excursion
-                                           (goto-char (posn-point start))
-                                           (dape-watch-dwim sym nil t))))))
-                       map)
-                     'help-echo
-                     (format "mouse-2, RET: add `%s' to watch" symbol))
-                     (propertize
-                      (truncate-string-to-width
-                       (substring value
-                                  0 (string-match-p "\n" value))
-                       dape-inlay-hints-variable-name-max nil nil t)
-                      'mouse-face 'highlight
-                      'help-echo value
-                      'face (if update 'dape-inlay-hint-highlight-face
-                              'dape-inlay-hint-face)))
-                    into after-string
-                    finally do
-                    (thread-last
-                      (mapconcat 'identity after-string dape--inlay-hint-seperator)
-                      (format "  %s")
-                      (overlay-put inlay-hint 'after-string)))))
+  (cl-loop
+   for inlay-hint in dape--inlay-hint-overlays
+   when (overlayp inlay-hint) do
+   (cl-loop
+    with symbols = (overlay-get inlay-hint 'dape-symbols)
+    for (symbol value update) in  symbols
+    when value collect
+    (concat
+     (propertize (format "%s:" symbol)
+                 'face 'dape-inlay-hint-face
+                 'mouse-face 'highlight
+                 'keymap
+                 (let ((map (make-sparse-keymap))
+                       (sym symbol))
+                   (define-key map [mouse-1]
+                               (lambda (event)
+                                 (interactive "e")
+                                 (save-selected-window
+                                   (let ((start (event-start event)))
+                                     (select-window (posn-window start))
+                                     (save-excursion
+                                       (goto-char (posn-point start))
+                                       (dape-watch-dwim sym nil t))))))
+                   map)
+                 'help-echo
+                 (format "mouse-2: add `%s' to watch" symbol))
+     " "
+     (propertize (truncate-string-to-width
+                  (substring value 0 (string-match-p "\n" value))
+                  dape-inlay-hints-variable-name-max nil nil t)
+                 'help-echo value
+                 'face (if update 'dape-inlay-hint-highlight-face
+                         'dape-inlay-hint-face)))
+    into after-string finally do
+    (thread-last (mapconcat 'identity after-string dape--inlay-hint-seperator)
+                 (format "  %s")
+                 (overlay-put inlay-hint 'after-string)))))
 
 (defun dape-inlay-hints-update ()
   "Update inlay hints."
