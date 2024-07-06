@@ -138,6 +138,14 @@
                                 "debugAdapters"
                                 "bin"
                                 "OpenDebugAD7")
+     fn (lambda (config)
+          ;; For MI=GDB the :program path need to be absolute
+          (let ((program (plist-get config :program)))
+            (if (file-name-absolute-p program)
+                config
+              (thread-last (tramp-file-local-name (dape--guess-root config))
+                           (expand-file-name program)
+                           (plist-put config :program)))))
      :type "cppdbg"
      :request "launch"
      :cwd "."
@@ -3119,12 +3127,13 @@ See `dape-request' for expected CB signature."
                   (plist-put dape--source-buffers
                              (plist-get source :sourceReference) buffer))
             (with-current-buffer buffer
-              (if-let ((mode
-                        (alist-get mimeType dape-mime-mode-alist nil nil 'equal)))
-                  (unless (eq major-mode mode)
-                    (funcall mode))
-                (message "Unknown mime type %s, see `dape-mime-mode-alist'"
-                         mimeType))
+              (when mimeType
+                (if-let ((mode
+                          (alist-get mimeType dape-mime-mode-alist nil nil 'equal)))
+                    (unless (eq major-mode mode)
+                      (funcall mode))
+                  (message "Unknown mime type %s, see `dape-mime-mode-alist'"
+                           mimeType)))
               (setq-local buffer-read-only t
                           dape--source source)
               (let ((inhibit-read-only t))
