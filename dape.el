@@ -476,7 +476,16 @@ Each element should look like (MIME-TYPE . MODE) where
   :type 'key-sequence)
 
 (defcustom dape-display-source-buffer-action
-  '(display-buffer-same-window)
+  `((display-buffer-use-some-window display-buffer-pop-up-window)
+    (some-window
+     . (lambda (&rest _)
+         (cl-loop for w in (window-list) unless
+                  (buffer-match-p '(or "\*dape-shell\*"
+                                       (derived-mode . dape-repl-mode)
+                                       (derived-mode . dape-memory-mode)
+                                       (derived-mode . dape-info-parent-mode))
+                                  (window-buffer w))
+                  return w))))
   "`display-buffer' action used when displaying source buffer."
   :type 'sexp)
 
@@ -1096,36 +1105,35 @@ On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
 
 (defun dape--display-buffer (buffer)
   "Display BUFFER according to `dape-buffer-window-arrangement'."
-  (display-buffer
-   buffer
-   (let* ((mode (with-current-buffer buffer major-mode))
-          (group (cl-position-if (lambda (group) (memq mode group))
-                                 dape-info-buffer-window-groups)))
-     (pcase dape-buffer-window-arrangement
-       ((or 'left 'right)
-        (cons '(display-buffer-in-side-window)
-              (pcase (cons mode group)
-                (`(dape-repl-mode . ,_) '((side . bottom) (slot . -1)))
-                (`(shell-mode . ,_) '((side . bottom) (slot . 0)))
-                (`(,_ . 0) `((side . ,dape-buffer-window-arrangement) (slot . -1)))
-                (`(,_ . 1) `((side . ,dape-buffer-window-arrangement) (slot . 0)))
-                (`(,_ . 2) `((side . ,dape-buffer-window-arrangement) (slot . 1)))
-                (_ (error "Unable to display buffer of mode `%s'" mode)))))
-       ('gud
-        (pcase (cons mode group)
-          (`(dape-repl-mode . ,_)
-           '((display-buffer-in-side-window) (side . top) (slot . -1)))
-          (`(shell-mode . ,_)
-           '((display-buffer-reuse-window) (display-buffer-pop-up-window)
-             (direction . right) (dedicated . t)))
-          (`(,_ . 0)
-           '((display-buffer-in-side-window) (side . top) (slot . 0)))
-          (`(,_ . 1)
-           '((display-buffer-in-side-window) (side . bottom) (slot . -1)))
-          (`(,_ . 2)
-           '((display-buffer-in-side-window) (side . bottom) (slot . 1)))
-          (_ (error "Unable to display buffer of mode `%s'" mode))))
-       (_ (user-error "Invalid value of `dape-buffer-window-arrangement'"))))))
+  (pcase-let* ((mode (with-current-buffer buffer major-mode))
+               (group (cl-position-if (lambda (group) (memq mode group))
+                                      dape-info-buffer-window-groups))
+               (`(,fns . ,alist)
+                (pcase dape-buffer-window-arrangement
+                  ((or 'left 'right)
+                   (cons '(display-buffer-in-side-window)
+                         (pcase (cons mode group)
+                           (`(dape-repl-mode . ,_) '((side . bottom) (slot . -1)))
+                           (`(shell-mode . ,_) '((side . bottom) (slot . 0)))
+                           (`(,_ . 0) `((side . ,dape-buffer-window-arrangement) (slot . -1)))
+                           (`(,_ . 1) `((side . ,dape-buffer-window-arrangement) (slot . 0)))
+                           (`(,_ . 2) `((side . ,dape-buffer-window-arrangement) (slot . 1)))
+                           (_ (error "Unable to display buffer of mode `%s'" mode)))))
+                  ('gud
+                   (pcase (cons mode group)
+                     (`(dape-repl-mode . ,_)
+                      '((display-buffer-in-side-window) (side . top) (slot . -1)))
+                     (`(shell-mode . ,_)
+                      '((display-buffer-pop-up-window)
+                        (direction . right) (dedicated . t)))
+                     (`(,_ . 0)
+                      '((display-buffer-in-side-window) (side . top) (slot . 0)))
+                     (`(,_ . 1)
+                      '((display-buffer-in-side-window) (side . bottom) (slot . -1)))
+                     (`(,_ . 2)
+                      '((display-buffer-in-side-window) (side . bottom) (slot . 1)))
+                     (_ (error "Unable to display buffer of mode `%s'" mode)))))))
+    (display-buffer buffer `((display-buffer-reuse-window . ,fns) . ,alist))))
 
 (defmacro dape--mouse-command (name doc command)
   "Create mouse command with NAME, DOC which call COMMAND."
@@ -5228,6 +5236,24 @@ See `eldoc-documentation-functions', for more information."
 
 ;;; Mode line
 
+(easy-menu-define dape-menu nil
+  "Menu for `dape-active-mode'."
+  `("Dape"
+    ["Continue" dape-continue :enable (dape--live-connection 'stopped)]
+    ["Next" dape-next :enable (dape--live-connection 'stopped)]
+    ["Step in" dape-step-in :enable (dape--live-connection 'stopped)]
+    ["Step out" dape-step-out :enable (dape--live-connection 'stopped)]
+    ["Pause" dape-pause :enable (not (dape--live-connection 'stopped))]
+    ["Quit" dape-quit]
+    "--"
+    ["REPL" dape-repl]
+    ["Info buffers" dape-info]
+    ["Memory" dape-read-memory
+     :enable (dape--capable-p (dape--live-connection 'last)
+                              :supportsReadMemoryRequest)]
+    "--"
+    ["Customize Dape" (lambda () (interactive) (customize-group "dape"))]))
+
 (defun dape--update-state (conn state &optional reason)
   "Update Dape mode line with STATE symbol for adapter CONN."
   (setf (dape--state conn) state)
@@ -5246,7 +5272,13 @@ See `eldoc-documentation-functions', for more information."
                   dape--connection)))
     (setq dape--mode-line-format
           `((:propertize "dape"
-                         face font-lock-constant-face)
+                         face font-lock-constant-face
+                         mouse-face mode-line-highlight
+                         help-echo "Dape: Debug Adapter Protocol for Emacs\n\
+mouse-1: Display minor mode menu"
+                         keymap ,(let ((map (make-sparse-keymap)))
+                                  (define-key map [mode-line down-mouse-1] dape-menu)
+                                  map))
             ":"
             (:propertize ,(format "%s" (or (and conn (dape--state conn))
                                            'unknown))
