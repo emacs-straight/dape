@@ -284,7 +284,23 @@ source buffers and `repeat-mode' for more pleasant key mappings.
   └────
 
 
-4.13 Other untested adapters
+4.13 PHP - Xdebug
+─────────────────
+
+  1. Install and setup `Xdebug' see [instructions]
+  2. Install `node'
+  3. Download latest `vsix' [release] of DAP adapter for `Xdebug'
+     `php-debug-<version>.vsix'
+  4. Unpack `mkdir -p ~/.emacs.d/debug-adapters && unzip
+     php-debug-<version>.vsix -d ~/.emacs.d/debug-adapters/php-debug'
+
+
+[instructions] <https://github.com/xdebug/vscode-php-debug>
+
+[release] <https://github.com/xdebug/vscode-php-debug/releases>
+
+
+4.14 Other untested adapters
 ────────────────────────────
 
   If you find a working configuration for any other debug adapter please
