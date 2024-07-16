@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.13.0
+;; Version: 0.14.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -687,39 +687,34 @@ The hook is run with one argument, the compilation buffer."
 
 
 ;;; Face
-(defface dape-breakpoint-face
-  '((t :inherit (font-lock-keyword-face)))
+(defface dape-breakpoint-face '((t :inherit font-lock-keyword-face))
   "Face used to display breakpoint overlays.")
 
-(defface dape-log-face
-  '((t :inherit (font-lock-string-face)
-       :height 0.85 :box (:line-width -1)))
+(defface dape-log-face '((t :inherit font-lock-string-face
+                            :height 0.85 :box (:line-width -1)))
   "Face used to display log breakpoints.")
 
-(defface dape-expression-face
-  '((t :inherit (dape-breakpoint-face)
-       :height 0.85 :box (:line-width -1)))
+(defface dape-expression-face '((t :inherit dape-breakpoint-face
+                                   :height 0.85 :box (:line-width -1)))
   "Face used to display conditional breakpoints.")
 
-(defface dape-hits-face
-  '((t :inherit (font-lock-number-face)
-       :height 0.85 :box (:line-width -1)))
+(defface dape-hits-face '((t :inherit font-lock-number-face
+                             :height 0.85 :box (:line-width -1)))
   "Face used to display hits breakpoints.")
 
-(defface dape-exception-description-face
-  '((t :extend t :inherit (error tooltip)))
+(defface dape-exception-description-face '((t :inherit (error tooltip)
+                                              :extend t))
   "Face used to display exception descriptions inline.")
 
-(defface dape-source-line-face
-  '((t))
+(defface dape-source-line-face '((t))
   "Face used to display stack frame source line overlays.")
 
-(defface dape-repl-success-face
-  '((t :inherit compilation-mode-line-exit :extend t))
+(defface dape-repl-success-face '((t :inherit compilation-mode-line-exit
+                                     :extend t))
   "Face used in repl for exit code 0.")
 
-(defface dape-repl-error-face
-  '((t :inherit compilation-mode-line-fail :extend t))
+(defface dape-repl-error-face '((t :inherit compilation-mode-line-fail
+                                   :extend t))
   "Face used in repl for non 0 exit codes.")
 
 
@@ -923,28 +918,16 @@ See `dape-configs' symbols prefix-local prefix-remote."
               (string-remove-prefix (car mapping) path))
     path))
 
-(defun dape--capable-p (conn of)
-  "If CONN capable OF."
-  (eq (plist-get (dape--capabilities conn) of) t))
+(defun dape--capable-p (conn thing)
+  "Return non nil if CONN capable of THING."
+  (eq (plist-get (dape--capabilities conn) thing) t))
 
 (defun dape--current-stack-frame (conn)
   "Current stack frame plist for CONN."
-  (let* ((stack-frames (thread-first
-                         (dape--current-thread conn)
-                         (plist-get :stackFrames)))
-         (stack-frames-with-source
-          (seq-filter (lambda (stack-frame)
-                        (let* ((source (plist-get stack-frame :source))
-                               (path (plist-get source :path))
-                               (source-reference
-                                (or (plist-get source :sourceReference) 0)))
-                          (or path (not (zerop source-reference)))))
-                      stack-frames)))
-    (or (seq-find (lambda (stack-frame)
-                    (eq (plist-get stack-frame :id)
-                        (dape--stack-id conn)))
-                  stack-frames-with-source)
-        (car stack-frames-with-source)
+  (let ((stack-frames (plist-get (dape--current-thread conn) :stackFrames)))
+    (or (when conn
+          (cl-find (dape--stack-id conn) stack-frames
+                   :key (lambda (frame) (plist-get frame :id))))
         (car stack-frames))))
 
 (defun dape--object-to-marker (conn plist)
@@ -954,17 +937,15 @@ Note requires `dape--source-ensure' if source is by reference."
   (when-let ((source (plist-get plist :source))
              (line (or (plist-get plist :line) 1))
              (buffer
-              (or (when-let* ((source-reference
-                               (plist-get source :sourceReference))
-                              (buffer (plist-get dape--source-buffers
-                                                 source-reference))
-                              ((buffer-live-p buffer)))
-                    buffer)
-                  (when-let* ((path (plist-get source :path))
-                              (path (dape--path conn path 'local))
-                              ((file-exists-p path))
-                              (buffer (find-file-noselect path t)))
-                    buffer))))
+              (cond
+               ((and-let* ((ref (plist-get source :sourceReference))
+                           (buffer (plist-get dape--source-buffers ref))
+                           ((buffer-live-p buffer)))
+                  buffer))
+               ((and-let* ((path (plist-get source :path))
+                           (path (dape--path conn path 'local))
+                           ((file-exists-p path)))
+                  (find-file-noselect path t))))))
     (with-current-buffer buffer
       (save-excursion
         (goto-char (point-min))
@@ -1625,8 +1606,6 @@ See `dape-request' for expected CB signature."
 (defun dape--update-threads (conn cb)
   "Update threads for CONN in-place if possible.
 See `dape-request' for expected CB signature."
-  ;; TODO Should de-bounce these request as they really flood the pipe
-  ;;      when triggered from "thread" event.
   (dape--with-request-bind
       ((&key threads &allow-other-keys) error)
       (dape-request conn "threads" nil)
@@ -2562,7 +2541,7 @@ Optional argument SKIP-REMOVE limits usage to only adding watched vars."
     (unless skip-add
       (push (list :name expression)
             dape--watched)
-      ;; FIXME don't want to have a depency on info ui in core commands
+      ;; FIXME Remove dependency on ui in core commands
       (dape--display-buffer (dape--info-get-buffer-create 'dape-info-watch-mode))))
   (run-hooks 'dape-update-ui-hook))
 
@@ -2750,12 +2729,7 @@ Using BUFFER and STR."
 (define-derived-mode dape-memory-mode hexl-mode "Memory"
   "Mode for reading and writing memory."
   :interactive nil
-  ;; TODO Replace or improve hexl.
-  ;;      hexl is not really fitted for our use case as it does
-  ;;      support offset in any way.  The buffer is created with the
-  ;;      hexl binary as is.  Filling the buffer with junk before
-  ;;      `hexlify-buffer' is not an option as it might be extremely
-  ;;      large.
+  ;; TODO Look for alternatives to hexl, which handles address offsets
   (add-hook 'eldoc-documentation-functions
             #'dape--memory-print-current-point-info nil t)
   ;; FIXME Is `revert-buffer-in-progress-p' is not respected
@@ -2838,8 +2812,8 @@ of memory read."
   (let ((map (make-sparse-keymap)))
     (define-key map [left-fringe mouse-1] 'dape-mouse-breakpoint-toggle)
     (define-key map [left-margin mouse-1] 'dape-mouse-breakpoint-toggle)
-    ;; TODO mouse-2 should be replaced by an menu for setting all
-    ;;      breakpoint types.
+    ;; TODO Would be nice if mouse-2 would open an menu for any
+    ;;      breakpoint type (expression, log and hit).
     (define-key map [left-fringe mouse-2] 'dape-mouse-breakpoint-expression)
     (define-key map [left-margin mouse-2] 'dape-mouse-breakpoint-expression)
     (define-key map [left-fringe mouse-3] 'dape-mouse-breakpoint-log)
@@ -3123,49 +3097,52 @@ Will use `dape-default-breakpoints-file' if FILE is nil."
 
 ;;; Source buffers
 
+(defun dape--source (conn plist)
+  "Return source from PLIST for adapter CONN.
+Source is a number, string, buffer or nil if not available."
+  (let* ((source (plist-get plist :source))
+         (path (plist-get source :path))
+         (ref (plist-get source :sourceReference))
+         (buffer (plist-get dape--source-buffers ref)))
+    (or (and path (file-exists-p (dape--path conn path 'local)) path)
+        (and buffer (buffer-live-p buffer) buffer)
+        (and (numberp ref) (< 0 ref) ref))))
+
 (defun dape--source-ensure (conn plist cb)
   "Ensure that source object in PLIST exist for adapter CONN.
 See `dape-request' for expected CB signature."
-  (let* ((source (plist-get plist :source))
-         (path (plist-get source :path))
-         (source-reference (plist-get source :sourceReference))
-         (buffer (plist-get dape--source-buffers source-reference)))
-    (cond
-     ((or (not conn)
-          (not (jsonrpc-running-p conn))
-          (and path (file-exists-p (dape--path conn path 'local)))
-          (and buffer (buffer-live-p buffer)))
-      (dape--request-return cb))
-     ((and (numberp source-reference) (> source-reference 0))
-      (dape--with-request-bind
-          ((&key content mimeType &allow-other-keys) error)
-          (dape-request conn "source" (list :source source
-                                            :sourceReference source-reference))
-        (cond
-         (error
-          (dape--repl-message (format "%s" error) 'dape-repl-error-face))
-         (content
-          (let ((buffer
-                 (generate-new-buffer (format "*dape-source %s*"
-                                              (plist-get source :name)))))
-            (setq dape--source-buffers
-                  (plist-put dape--source-buffers
-                             (plist-get source :sourceReference) buffer))
-            (with-current-buffer buffer
-              (when mimeType
-                (if-let ((mode
-                          (alist-get mimeType dape-mime-mode-alist nil nil 'equal)))
-                    (unless (eq major-mode mode)
-                      (funcall mode))
-                  (message "Unknown mime type %s, see `dape-mime-mode-alist'"
-                           mimeType)))
-              (setq-local buffer-read-only t
-                          dape--source source)
-              (let ((inhibit-read-only t))
-                (erase-buffer)
-                (insert content))
-              (goto-char (point-min)))
-            (dape--request-return cb)))))))))
+  (pcase (dape--source conn plist)
+    ((or (pred stringp) (pred bufferp)) (dape--request-return cb))
+    ((and (pred numberp) source-reference)
+     (let ((source (plist-get plist :source)))
+       (dape--with-request-bind
+           ((&key content mimeType &allow-other-keys) error)
+           (dape-request conn "source"
+                         (list :source source :sourceReference source-reference))
+         (cond
+          (error (dape--repl-message (format "%s" error) 'dape-repl-error-face))
+          (content
+           (let ((buffer
+                  (generate-new-buffer (format "*dape-source %s*"
+                                               (plist-get source :name)))))
+             (setq dape--source-buffers
+                   (plist-put dape--source-buffers
+                              (plist-get source :sourceReference) buffer))
+             (with-current-buffer buffer
+               (when mimeType
+                 (if-let ((mode
+                           (alist-get mimeType dape-mime-mode-alist nil nil 'equal)))
+                     (unless (eq major-mode mode)
+                       (funcall mode))
+                   (message "Unknown mime type %s, see `dape-mime-mode-alist'"
+                            mimeType)))
+               (setq-local buffer-read-only t
+                           dape--source source)
+               (let ((inhibit-read-only t))
+                 (erase-buffer)
+                 (insert content))
+               (goto-char (point-min)))
+             (dape--request-return cb)))))))))
 
 
 ;;; Stack frame source
@@ -3192,10 +3169,15 @@ See `dape-request' for expected CB signature."
   "Update stack frame arrow marker for adapter CONN.
 `dape-display-source-buffer-action'."
   (dape--stack-frame-cleanup)
-  (when-let (((dape--stopped-threads conn))
-             (frame (dape--current-stack-frame conn)))
-    (let ((deepest-p
-           (eq frame (car (plist-get (dape--current-thread conn) :stackFrames)))))
+  (when-let* (((dape--stopped-threads conn))
+              (frames (plist-get (dape--current-thread conn) :stackFrames))
+              (selected (dape--current-stack-frame conn))
+              (frame (cl-loop for cell on frames for (frame) = cell
+                              when (eq frame selected) return
+                              (cl-loop for frame in cell when
+                                       (dape--source conn frame)
+                                       return frame))))
+    (let ((deepest-p (eq selected (car frames))))
       (dape--with-request (dape--source-ensure conn frame)
         ;; An update event could have fired between call to
         ;; `dape--stack-frame-cleanup' and callback, we have make
@@ -3241,9 +3223,6 @@ See `dape-request' for expected CB signature."
 
 
 ;;; Info Buffers
-
-;; TODO Because buttons where removed from info buffer
-;;      there should be a way to control execution by mouse
 
 (defvar-local dape--info-buffer-related nil
   "List of related buffers.")
@@ -3370,12 +3349,6 @@ FN is expected to update insert buffer contents, update
 `dape--info-buffer-related' and `header-line-format'."
   ;; Save buffer as `select-window' sets buffer
   (save-current-buffer
-    ;; FIXME: This guarantees that only info buffers are erased if
-    ;;        something unexpected happens with the current-buffer.
-    ;;        If buffer is killed while waiting for an response in
-    ;;        an caller of this function current-buffer *will* change
-    ;;        and another dape info buffer will be reused for this
-    ;;        update and that is not correct.
     (when (derived-mode-p 'dape-info-parent-mode)
       ;; Would be nice with replace-buffer-contents
       ;; But it seams to messes up string properties
@@ -4055,7 +4028,7 @@ current buffer with CONN config."
     (unless (dape--capable-p conn :supportsDataBreakpoints)
       (user-error "Adapter does not support data breakpoints"))
     (dape--with-request-bind
-        ;; TODO Test if canPersist works, hanve not found an adapter
+        ;; TODO Test if canPersist works, have not found an adapter
         ;;      supporting it.
         ((&key dataId description accessTypes &allow-other-keys) error)
         (dape-request conn "dataBreakpointInfo"
@@ -4071,10 +4044,7 @@ current buffer with CONN config."
                     :dataId dataId
                     :accessType (completing-read
                                  (format "Breakpoint type for `%s': " name)
-                                 (append accessTypes nil) nil t)
-                    ;; TODO Support :condition
-                    ;; TODO Support :hitCondition
-                    )
+                                 (append accessTypes nil) nil t))
               dape--data-breakpoints)
         (dape--with-request
             (dape--set-data-breakpoints conn)
@@ -4091,8 +4061,6 @@ current buffer with CONN config."
     (define-key map "b" 'dape-info-scope-data-breakpoint)
     map)
   "Local keymap for dape scope buffers.")
-
-;; TODO Add bindings for adding data breakpoint
 
 (defun dape--info-locals-table-columns-list (alist)
   "Format and arrange the columns in locals display based on ALIST."
@@ -4818,6 +4786,10 @@ Update `dape--inlay-hint-overlays' from SCOPES."
 
 ;;; Minibuffer config hints
 
+(defface dape-minibuffer-hint-separator-face '((t :inherit shadow
+                                                  :strike-through t))
+  "Face used to separate hint overlay.")
+
 (defvar dape--minibuffer-suggestions nil
   "Suggested configurations in minibuffer.")
 
@@ -4832,84 +4804,75 @@ Update `dape--inlay-hint-overlays' from SCOPES."
 
 (defun dape--minibuffer-hint (&rest _)
   "Display current configuration in minibuffer in overlay."
-  (save-excursion
-    (let ((str
-           (string-trim (buffer-substring (minibuffer-prompt-end)
-                                          (point-max))))
-          use-cache use-ensure-cache error-message hint-key hint-config hint-rows)
-
-      (ignore-errors
-        (pcase-setq `(,hint-key ,hint-config) (dape--config-from-string str t)))
-      (setq default-directory
-            (or (with-current-buffer dape--minibuffer-last-buffer
-                  (ignore-errors (dape--guess-root hint-config)))
-                default-directory)
-            use-cache
-            (pcase-let ((`(,key ,config)
-                         dape--minibuffer-cache))
-              (and (equal hint-key key)
-                   (equal hint-config config)))
-            use-ensure-cache
-            (pcase-let ((`(,key config ,error-message)
-                         dape--minibuffer-cache))
-              ;; FIXME ensure is expensive so we are a bit cheap
-              ;; here, correct would be to use `use-cache'
-              (and (equal hint-key key)
-                   (not error-message)))
+  (pcase-let*
+      ((`(,key ,config ,error-message ,hint-rows) dape--minibuffer-cache)
+       (str (string-trim (buffer-substring (minibuffer-prompt-end) (point-max))))
+       (`(,hint-key ,hint-config) (ignore-errors (dape--config-from-string str t)))
+       (default-directory
+        (or (with-current-buffer dape--minibuffer-last-buffer
+              (ignore-errors (dape--guess-root hint-config)))
+            default-directory))
+       (use-cache (and (equal hint-key key)
+                       (equal hint-config config)))
+       (use-ensure-cache
+        ;; Ensure is expensive so we are cheating and don't re run
+        ;; ensure if an ensure has evaled without signaling once
+        (and (equal hint-key key)
+             (not error-message)))
+       (error-message
+        (if use-ensure-cache
             error-message
-            (if use-ensure-cache
-                (pcase-let ((`(key config ,error-message)
-                             dape--minibuffer-cache))
-                  error-message)
-              (condition-case err
-                  (progn
-                    (with-current-buffer dape--minibuffer-last-buffer
-                      (dape--config-ensure hint-config t))
-                    nil)
-                (error (setq error-message (error-message-string err)))))
+          (condition-case err
+              (progn (with-current-buffer dape--minibuffer-last-buffer
+                       (dape--config-ensure hint-config t))
+                     nil)
+            (error (error-message-string err)))))
+       (hint-rows
+        (if use-cache
             hint-rows
-            (if use-cache
-                (pcase-let ((`(key config error-message ,hint-rows)
-                             dape--minibuffer-cache))
-                  hint-rows)
-              (cl-loop with base-config = (alist-get hint-key dape-configs)
-                       for (key value) on hint-config by 'cddr
-                       unless (or (memq key dape-minibuffer-hint-ignore-properties)
-                                  (and (eq key 'port) (eq value :autoport))
-                                  (eq key 'ensure))
-                       collect (concat
-                                (propertize (format "%s" key)
-                                            'face 'font-lock-keyword-face)
-                                " "
-                                (with-current-buffer dape--minibuffer-last-buffer
-                                  (condition-case err
-                                      (propertize
-                                       (format "%S"
-                                               (dape--config-eval-value value nil nil t))
-                                       'face
-                                       (when (equal value (plist-get base-config key))
-                                         'shadow))
-                                    (error
-                                     (propertize (error-message-string err)
-                                                 'face 'error)))))))
-            dape--minibuffer-cache
-            (list hint-key hint-config error-message hint-rows))
+          (cl-loop
+           with base-config = (alist-get hint-key dape-configs)
+           for (key value) on hint-config by 'cddr
+           unless (or (memq key dape-minibuffer-hint-ignore-properties)
+                      (and (eq key 'port) (eq value :autoport))
+                      (eq key 'ensure))
+           collect
+           (concat
+            (propertize (format "%s" key)
+                        'face 'font-lock-keyword-face)
+            " "
+            (with-current-buffer dape--minibuffer-last-buffer
+              (condition-case err
+                  (propertize
+                   (format "%S" (dape--config-eval-value value nil nil t))
+                   'face
+                   (when (equal value (plist-get base-config key))
+                     'shadow))
+                (error
+                 (propertize (error-message-string err)
+                             'face 'error)))))))))
+    (setq dape--minibuffer-cache
+          (list hint-key hint-config error-message hint-rows))
+    (overlay-put dape--minibuffer-hint-overlay
+                 'before-string
+                 (concat
+                  (propertize " " 'cursor 0)
+                  (when error-message
+                    (format "%s" (propertize error-message 'face 'error)))))
+    (when dape-minibuffer-hint
       (overlay-put dape--minibuffer-hint-overlay
-                   'before-string
+                   'after-string
                    (concat
-                    (propertize " " 'cursor 0)
-                    (when error-message
-                      (format "%s" (propertize error-message 'face 'error)))))
-      (when dape-minibuffer-hint
-        (overlay-put dape--minibuffer-hint-overlay
-                     'after-string
-                     (concat
-                      (when hint-rows
-                        (concat
-                         "\n\n"
-                         (mapconcat 'identity hint-rows "\n")))))))
-    (move-overlay dape--minibuffer-hint-overlay
-                  (point-max) (point-max) (current-buffer))))
+                    (when hint-rows
+                      (concat
+                       "\n"
+                       (propertize
+                        " " 'face 'dape-minibuffer-hint-separator-face
+                        'display '(space :align-to right))
+                       "\n"
+                       (mapconcat 'identity hint-rows "\n")))))
+      (move-overlay dape--minibuffer-hint-overlay
+                    (point-max) (point-max) (current-buffer)))))
 
 
 ;;; Config
