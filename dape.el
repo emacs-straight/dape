@@ -2630,8 +2630,6 @@ Using BUFFER and STR."
   "Start compilation for CONFIG."
   (let ((default-directory (dape--guess-root config))
         (command (plist-get config 'compile)))
-    ;; TODO Is it really necessary to have `dape-compile-fn' as an
-    ;;      option as `default-directory' is set.
     (funcall dape-compile-fn command)
     (with-current-buffer (compilation-find-buffer)
       (setq dape--compile-config config)
@@ -4455,7 +4453,13 @@ Send INPUT to DUMMY-PROCESS."
                 (and dape-repl-use-shorthand
                      (cdr (assoc input (dape--repl-shorthand-alist))))))
       (dape--repl-insert-prompt)
-      (call-interactively cmd))
+      ;; HACK: Special handing of `dape-quit', `comint-send-input'
+      ;;       expects buffer to be still live after calling
+      ;;       `comint-input-sender'.  Kill buffer with timer instead
+      ;;       to avoid error signal.
+      (if (eq 'dape-quit cmd)
+	  (run-with-timer 0 nil 'dape-quit)
+	(call-interactively cmd)))
      ;; Evaluate expression
      (t
       (dape--repl-insert-prompt)
