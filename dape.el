@@ -4084,7 +4084,6 @@ current buffer with CONN config."
         ;;      supporting it.
         ((&key dataId description accessTypes &allow-other-keys) error)
         (dape-request conn "dataBreakpointInfo"
-                      ;; TODO Find and test
                       (if (eq dape--info-ref 'watch)
                           (list :name name
                                 :frameId (plist-get (dape--current-stack-frame conn) :id))
@@ -5212,28 +5211,31 @@ See `dape--config-mode-p' how \"valid\" is defined."
           (add-hook 'after-change-functions
                     #'dape--minibuffer-hint nil t)
           (dape--minibuffer-hint))
-      (pcase-let* ((str
-                    (let ((history-add-new-input nil))
-                      (read-from-minibuffer
-                       "Run adapter: "
-                       initial-contents
-                       (let ((map (make-sparse-keymap)))
-                         (set-keymap-parent map minibuffer-local-map)
-                         (define-key map (kbd "C-M-i") #'completion-at-point)
-                         (define-key map "\t" #'completion-at-point)
-                         (define-key map (kbd "C-c C-k")
-                                     (lambda ()
-                                       (interactive)
-                                       (pcase-let* ((str (buffer-substring (minibuffer-prompt-end)
-                                                                           (point-max)))
-                                                    (`(,key) (dape--config-from-string str t)))
-                                         (delete-region (minibuffer-prompt-end) (point-max))
-                                         (insert (format "%s" key) " "))))
-                         map)
-                       nil 'dape-history initial-contents)))
-                   (`(,key ,config)
-                    (dape--config-from-string (substring-no-properties str) t))
-                   (evaled-config (dape--config-eval key config)))
+      (pcase-let*
+          ((str
+            (let ((history-add-new-input nil))
+              (read-from-minibuffer
+               "Run adapter: "
+               initial-contents
+               (let ((map (make-sparse-keymap)))
+                 (set-keymap-parent map minibuffer-local-map)
+                 (define-key map (kbd "C-M-i") #'completion-at-point)
+                 (define-key map "\t" #'completion-at-point)
+                 (define-key map (kbd "C-c C-k")
+                             (lambda ()
+                               (interactive)
+                               (pcase-let*
+                                   ((str (buffer-substring (minibuffer-prompt-end)
+                                                           (point-max)))
+                                    (`(,key) (dape--config-from-string str t)))
+                                 (delete-region (minibuffer-prompt-end)
+                                                (point-max))
+                                 (insert (format "%s" key) " "))))
+                 map)
+               nil 'dape-history initial-contents)))
+           (`(,key ,config)
+            (dape--config-from-string (substring-no-properties str) t))
+           (evaled-config (dape--config-eval key config)))
         (setq dape-history
               (cons (dape--config-to-string key evaled-config)
                     dape-history))
@@ -5246,27 +5248,28 @@ See `dape--config-mode-p' how \"valid\" is defined."
   "Hook function to produce doc strings for `eldoc'.
 On success calls CB with the doc string.
 See `eldoc-documentation-functions', for more information."
-       (and-let* ((conn (dape--live-connection 'last t))
-                  ((dape--capable-p conn :supportsEvaluateForHovers))
-                  (symbol (thing-at-point 'symbol)))
-         (dape--with-request-bind
-             (body error)
-             (dape--evaluate-expression conn
-                                        (plist-get (dape--current-stack-frame conn) :id)
-                                        (substring-no-properties symbol)
-                                        "hover")
-           (unless error
-             (funcall cb
-                      (format "%s %s"
-                              (or (plist-get body :value)
-                                  (plist-get body :result)
-                                  "")
-                              (propertize
-                               (or (plist-get body :type) "")
-                               'face 'font-lock-type-face))
-                      :thing symbol
-                      :face 'font-lock-variable-name-face))))
-       t)
+  (and-let* ((conn (dape--live-connection 'last t))
+             ((dape--capable-p conn :supportsEvaluateForHovers))
+             (symbol (thing-at-point 'symbol)))
+    (dape--with-request-bind
+        (body error)
+        (dape--evaluate-expression
+         conn
+         (plist-get (dape--current-stack-frame conn) :id)
+         (substring-no-properties symbol)
+         "hover")
+      (unless error
+        (funcall cb
+                 (format "%s %s"
+                         (or (plist-get body :value)
+                             (plist-get body :result)
+                             "")
+                         (propertize
+                          (or (plist-get body :type) "")
+                          'face 'font-lock-type-face))
+                 :thing symbol
+                 :face 'font-lock-variable-name-face))))
+  t)
 
 (defun dape--add-eldoc-hook ()
   "Add `dape-hover-function' from eldoc hook."
@@ -5320,8 +5323,8 @@ See `eldoc-documentation-functions', for more information."
                          help-echo "Dape: Debug Adapter Protocol for Emacs\n\
 mouse-1: Display minor mode menu"
                          keymap ,(let ((map (make-sparse-keymap)))
-                                  (define-key map [mode-line down-mouse-1] dape-menu)
-                                  map))
+                                   (define-key map [mode-line down-mouse-1] dape-menu)
+                                   map))
             ":"
             (:propertize ,(format "%s" (or (and conn (dape--state conn))
                                            'unknown))
