@@ -313,7 +313,24 @@ source buffers and `repeat-mode' for more pleasant key mappings.
 [ocamlearlybird] <https://github.com/hackwaly/ocamlearlybird>
 
 
-4.15 Other untested adapters
+4.15 Bash - bash-debug
+──────────────────────
+
+  1. Install `node'
+  2. Download latest `vsix' [release] of DAP adapter
+     `bash-debug-<version>.vsix'
+  3. Unpack `mkdir -p ~/.emacs.d/debug-adapters && unzip
+     bash-debug-<version>.vsix -d ~/.emacs.d/debug-adapters/bash-debug'
+
+  See [bash-debug] for more information.
+
+
+[release] <https://github.com/rogalmic/vscode-bash-debug/releases>
+
+[bash-debug] <https://github.com/rogalmic/vscode-bash-debug>
+
+
+4.16 Other untested adapters
 ────────────────────────────
 
   If you find a working configuration for any other debug adapter please
