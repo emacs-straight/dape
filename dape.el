@@ -2540,11 +2540,11 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
           (current-thread (dape--current-thread conn))
           (collection
            (let (done)
-             ;; Need to fetch all frames as might only have 1 frame
-             ;; fetches see `dape--stack-trace' and
-             ;; `:supportsDelayedStackTraceLoading'.
              (dape--with-request
                  (dape--stack-trace conn current-thread dape-stack-trace-levels)
+             ;; Only one stack frame is guaranteed to be available,
+             ;; so we need to reach out to make sure we got the full set.
+             ;; See `dape--stack-trace'.
                (setf done t))
              (with-timeout (5 nil)
                (while (not done) (accept-process-output nil 0.1)))
@@ -3233,72 +3233,80 @@ See `dape-request' for expected CB signature."
     (delete-overlay dape--stack-position-overlay))
   (set-marker dape--overlay-arrow-position nil))
 
+(defun dape--stack-frame-display-1 (conn frame deepest-p)
+  "Display FRAME for adapter CONN as if DEEPEST-p.
+Helper for `dape--stack-frame-display'."
+  (dape--with-request (dape--source-ensure conn frame)
+    ;; An update event could have fired between call to
+    ;; `dape--stack-frame-cleanup' and callback, we have make sure
+    ;; that overlay is deleted before we are dropping the overlay
+    ;; reference
+    (dape--stack-frame-cleanup)
+    (when-let ((marker (dape--object-to-marker conn frame)))
+      (with-current-buffer (marker-buffer marker)
+        (dape--add-eldoc-hook)
+        (save-excursion
+          (goto-char (marker-position marker))
+          (setq dape--stack-position-overlay
+                (let ((ov (make-overlay (line-beginning-position)
+                                        (line-beginning-position 2))))
+                  (overlay-put ov 'face 'dape-source-line-face)
+                  (when deepest-p
+                    (when-let ((exception-description
+                                (dape--exception-description conn)))
+                      (overlay-put ov 'after-string
+                                   (propertize (concat exception-description "\n")
+                                               'face
+                                               'dape-exception-description-face))))
+                  ov)
+                fringe-indicator-alist
+                (unless deepest-p
+                  '((overlay-arrow . hollow-right-triangle))))
+          ;; Finally lets move arrow to point
+          (move-marker dape--overlay-arrow-position
+                       (line-beginning-position)))
+        (when-let ((window
+                    (display-buffer (marker-buffer marker)
+                                    dape-display-source-buffer-action)))
+          ;; Change selected window if not `dape-repl' buffer is selected
+          (unless (with-current-buffer (window-buffer)
+                    (memq major-mode '(dape-repl-mode)))
+            (select-window window))
+          (with-selected-window window
+            ;; XXX: This code is running within timer context, which
+            ;;      does not play nice with `post-command-hook'.
+            ;;      Since hooks are runn'ed before the point is
+            ;;      actually moved.
+            (goto-char (marker-position marker))
+            ;; Here we are manually intervening to account for this.
+            ;; The following logic borrows from gud.el to interact
+            ;; with `hl-line'.
+            (when (featurep 'hl-line)
+	      (cond
+               (global-hl-line-mode (global-hl-line-highlight))
+	       ((and hl-line-mode hl-line-sticky-flag) (hl-line-highlight))))
+            (run-hooks 'dape-display-source-hook)))))))
+
 (defun dape--stack-frame-display (conn)
   "Update stack frame arrow marker for adapter CONN.
-`dape-display-source-buffer-action'."
+Buffer is displayed with `dape-display-source-buffer-action'."
   (dape--stack-frame-cleanup)
-  (when-let* (((dape--stopped-threads conn))
-              (frames (plist-get (dape--current-thread conn) :stackFrames))
-              (selected (dape--current-stack-frame conn))
-              (frame (cl-loop for cell on frames for (frame) = cell
-                              when (eq frame selected) return
-                              (cl-loop for frame in cell when
-                                       (dape--source conn frame)
-                                       return frame))))
-    (let ((deepest-p (eq selected (car frames))))
-      (dape--with-request (dape--source-ensure conn frame)
-        ;; An update event could have fired between call to
-        ;; `dape--stack-frame-cleanup' and callback, we have make
-        ;; sure that overlay is deleted before we are dropping the
-        ;; reference
-        (dape--stack-frame-cleanup)
-        (when-let ((marker (dape--object-to-marker conn frame)))
-          (with-current-buffer (marker-buffer marker)
-            (dape--add-eldoc-hook)
-            (save-excursion
-              (goto-char (marker-position marker))
-              (setq dape--stack-position-overlay
-                    (let ((ov (make-overlay (line-beginning-position)
-                                            (line-beginning-position 2))))
-                      (overlay-put ov 'face 'dape-source-line-face)
-                      (when deepest-p
-                        (when-let ((exception-description
-                                    (dape--exception-description conn)))
-                          (overlay-put ov 'after-string
-                                       (propertize (concat exception-description "\n")
-                                                   'face
-                                                   'dape-exception-description-face))))
-                      ov)
-                    fringe-indicator-alist
-                    (unless deepest-p
-                      '((overlay-arrow . hollow-right-triangle))))
-              ;; Finally lets move arrow to point
-              (move-marker dape--overlay-arrow-position
-                           (line-beginning-position)))
-            (when-let ((window
-                        (display-buffer (marker-buffer marker)
-                                        dape-display-source-buffer-action)))
-              ;; Change selected window if not `dape-repl' buffer is selected
-              (unless (with-current-buffer (window-buffer)
-                        (memq major-mode '(dape-repl-mode)))
-                (select-window window))
-              ;; FIXME Should be called with idle-timer as to
-              ;;       guarantee that we are not in `save-excursion'
-              ;;       context.  But this makes tests to hard write.
-              (with-selected-window window
-                (goto-char (marker-position marker))
-                ;; This code is running within the timer context
-                ;; rather than the command context.  Since the
-                ;; `post-command-hook' is executed before the point
-                ;; (cursor position) is actually updated, we must
-                ;; manually intervene to account for this.  The
-                ;; following logic borrows from gud.el to interact
-                ;; with `hl-line'.
-                (when (featurep 'hl-line)
-	          (cond
-                   (global-hl-line-mode (global-hl-line-highlight))
-	           ((and hl-line-mode hl-line-sticky-flag) (hl-line-highlight))))
-                (run-hooks 'dape-display-source-hook)))))))))
+  (when (dape--stopped-threads conn)
+    (let* ((selected (dape--current-stack-frame conn))
+           (thread (dape--current-thread conn))
+           (deepest-p (eq selected (car (plist-get thread :stackFrames)))))
+      (cl-flet ((displayable-frame ()
+                  (cl-loop with frames = (plist-get thread :stackFrames)
+                           for cell on frames for (frame . _rest) = cell
+                           when (eq frame selected) return
+                           (cl-loop for frame in cell when (dape--source conn frame)
+                                    return frame))))
+        (if-let (;; Check if frame is available, otherwise fetch all
+                 (frame (displayable-frame)))
+            (dape--stack-frame-display-1 conn frame deepest-p)
+          (dape--with-request (dape--stack-trace conn thread dape-stack-trace-levels)
+            (when-let ((frame (displayable-frame)))
+              (dape--stack-frame-display-1 conn frame deepest-p))))))))
 
 
 ;;; Info Buffers
@@ -3890,8 +3898,7 @@ See `dape-request' for expected CB signature."
 Create table from CURRENT-STACK-FRAME and STACK-FRAMES and insert into
 current buffer with CONN config."
   (cl-loop with table = (make-gdb-table)
-           for frame in stack-frames
-           do
+           for frame in stack-frames do
            (gdb-table-add-row
             table
             (list
@@ -4041,14 +4048,13 @@ current buffer with CONN config."
                          dape--connection)))
       (cl-loop with sources = (dape--sources conn)
                with table = (make-gdb-table)
-               for source in (reverse sources)
-               do (gdb-table-add-row table
-                                     (list (concat (plist-get source :name) " "))
-                                     (list
-                                      'dape--info-source source
-                                      'mouse-face 'highlight
-                                      'keymap dape-info-sources-line-map
-                                      'help-echo "mouse-2, RET: goto source"))
+               for source in (reverse sources) do
+               (gdb-table-add-row
+                table (list (concat (plist-get source :name) " "))
+                (list 'dape--info-source source
+                      'mouse-face 'highlight
+                      'keymap dape-info-sources-line-map
+                      'help-echo "mouse-2, RET: goto source"))
                finally (insert (gdb-table-string table " "))))))
 
 
@@ -5216,7 +5222,9 @@ See `dape--config-mode-p' how \"valid\" is defined."
                      dape-history)
            ;; Take first suggested config if only one exist
            (and (length= suggested-configs 1)
-                (car suggested-configs)))))
+                (car suggested-configs))))
+         (default-value (when initial-contents
+                          (concat (car (string-split initial-contents)) " "))))
     (setq dape--minibuffer-last-buffer (current-buffer)
           dape--minibuffer-cache nil)
     (minibuffer-with-setup-hook
@@ -5248,6 +5256,8 @@ See `dape--config-mode-p' how \"valid\" is defined."
                  (set-keymap-parent map minibuffer-local-map)
                  (define-key map (kbd "C-M-i") #'completion-at-point)
                  (define-key map "\t" #'completion-at-point)
+                 ;; This mapping is shadowed by `next-history-element'
+                 ;; future history (default-value)
                  (define-key map (kbd "C-c C-k")
                              (lambda ()
                                (interactive)
@@ -5259,7 +5269,7 @@ See `dape--config-mode-p' how \"valid\" is defined."
                                                 (point-max))
                                  (insert (format "%s" key) " "))))
                  map)
-               nil 'dape-history initial-contents)))
+               nil 'dape-history default-value)))
            (`(,key ,config)
             (dape--config-from-string (substring-no-properties str) t))
            (evaled-config (dape--config-eval key config)))
