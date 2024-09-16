@@ -5078,8 +5078,28 @@ If LOOSE-PARSING is non nil ignore arg parsing failures."
                             (string-trim)
                             (string-empty-p)
                             (not))
-            (push (read (current-buffer))
-                  read-config))
+            (let ((thing (read (current-buffer))))
+              (cond
+               ((eq thing '-)
+                (cl-loop
+                 with command = (split-string-shell-command
+                                 (buffer-substring (point) (point-max)))
+                 with setvar = "\\`\\([A-Za-z_][A-Za-z0-9_]*\\)=\\(.*\\)\\'"
+                 for cell on command for (program . args) = cell
+                 if (string-match setvar program)
+                 append `(,(intern (concat ":" (match-string 1 program)))
+                          ,(match-string 2 program))
+                 into env and for program = nil
+                 when (or (and (not program) (not args)) program) do
+                 (setq read-config
+                       (append (nreverse
+                                (append (when program `(:program ,program))
+                                        (when args `(:args ,(apply 'vector args)))
+                                        (when env `(:env ,env))))
+                               read-config))
+                 (throw 'done nil)))
+               (t
+                (push thing read-config)))))
         (error
          (unless loose-parsing
            (user-error "Unable to parse options %s"
@@ -5151,15 +5171,12 @@ nil."
   (let (key args args-bounds last-p)
     (save-excursion
       (goto-char (minibuffer-prompt-end))
-      (setq key
-            (ignore-errors (read (current-buffer))))
+      (setq key (ignore-errors (read (current-buffer))))
       (ignore-errors
         (while t
           (setq last-p (point))
-          (push (read (current-buffer))
-                args)
-          (push (cons last-p (point))
-                args-bounds))))
+          (push (read (current-buffer)) args)
+          (push (cons last-p (point)) args-bounds))))
     (setq args (nreverse args)
           args-bounds (nreverse args-bounds))
     (cond
@@ -5174,7 +5191,8 @@ nil."
               (mapcar (lambda (suggestion) (format "%s " suggestion))
                       dape--minibuffer-suggestions))))
      ;; Complete config args
-     ((and (alist-get key dape-configs)
+     ((and (not (plist-member args '-))
+           (alist-get key dape-configs)
            (or (and (plistp args)
                     (thing-at-point 'whitespace))
                (cl-loop with p = (point)
@@ -5191,9 +5209,7 @@ nil."
                        for (key _) on plist by 'cddr
                        collect (format "%s " key)))))
      (t
-      (list (point) (point)
-            nil
-            :exclusive 'no)))))
+      (list (point) (point) nil :exclusive 'no)))))
 
 (defun dape--read-config ()
   "Read config from minibuffer.
