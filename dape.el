@@ -720,7 +720,7 @@ See `dape-breakpoint-load' and `dape-breakpoint-save'."
   "Function to get current working directory.
 The function should return a string representing the absolute
 file path of the current working directory, usually the current
-project's root. See `dape--default-cwd'."
+project's root.  See `dape--default-cwd'."
   :type 'function)
 
 (defcustom dape-compile-hook nil
@@ -735,6 +735,12 @@ The hook is run with one argument, the compilation buffer."
 
 (defcustom dape-minibuffer-hint t
   "Show `dape-configs' hints in minibuffer."
+  :type 'boolean)
+
+(defcustom dape-history-evaluated t
+  "Keep `dape-history' configurations evaluated.
+Non-nil means each configuration read in command `dape' will be
+evaluated before being pushed to `dape-history'."
   :type 'boolean)
 
 (defcustom dape-ui-debounce-time 0.1
@@ -2216,8 +2222,7 @@ symbol `dape-connection'."
      :config config
      :parent parent
      :server-process server-process
-     :events-buffer-config `(:size ,(if dape-debug nil 0)
-                                   :format full)
+     :events-buffer-config `(:size ,(if dape-debug nil 0) :format full)
      :on-shutdown
      (lambda (conn)
        ;; error prints
@@ -4521,7 +4526,7 @@ Send INPUT to DUMMY-PROCESS."
       (dape-evaluate-expression
        (or (dape--live-connection 'stopped t)
            (dape--live-connection 'last))
-           (string-trim (substring-no-properties input)))))))
+       (string-trim (substring-no-properties input)))))))
 
 (defun dape--repl-completion-at-point ()
   "Completion at point function for *dape-repl* buffer."
@@ -4735,69 +4740,68 @@ Empty input will rerun last command.\n\n"
     (setq dape--inlay-hint-overlays
           (cl-loop for inlay-hint in (cons new-head dape--inlay-hint-overlays)
                    for i from 0
-                   if (< i (if (eq dape-inlay-hints t)
-                               2
-                             dape-inlay-hints))
+                   if (< i (if (eq dape-inlay-hints t) 2 dape-inlay-hints))
                    collect inlay-hint
                    else do (delete-overlay inlay-hint)))))
 
 (defun dape--inlay-hint-update-1 (scopes)
   "Helper for `dape--inlay-hint-update-1'.
 Update `dape--inlay-hint-overlays' from SCOPES."
-  (cl-loop with symbols =
-           (cl-loop for inlay-hint in dape--inlay-hint-overlays
-                    when (overlayp inlay-hint)
-                    append (overlay-get inlay-hint 'dape-symbols))
-           for scope in scopes do
-           (cl-loop for variable in (plist-get scope :variables)
-                    while symbols do
-                    (cl-loop for name = (plist-get variable :name)
-                             for cons = (assoc name symbols)
-                             while cons
-                             for (_ old-value) = cons
-                             for value = (plist-get variable :value)
-                             for updated-p = (and old-value
-                                                  (not (equal old-value value)))
-                             do
-                             (setcdr cons (list value updated-p))
-                             (setf symbols (delq cons symbols)))))
+  ;; Match variables with inlay hints and mark update
+  (cl-loop
+   with symbols =
+   (cl-loop for inlay-hint in dape--inlay-hint-overlays
+            when (overlayp inlay-hint)
+            append (overlay-get inlay-hint 'dape-symbols))
+   for scope in scopes do
+   (cl-loop for variable in (plist-get scope :variables)
+            for new = (plist-get variable :value)
+            for var-name = (plist-get variable :name) do
+            (cl-loop for cons in symbols for (hint-name old) = cons
+                     for updated-p = (and old (not (equal old new)))
+                     when (equal var-name hint-name) do
+                     (setcdr cons (list new updated-p)))))
+  ;; Format strings
   (cl-loop
    for inlay-hint in dape--inlay-hint-overlays
    when (overlayp inlay-hint) do
-   (cl-loop
-    with symbols = (overlay-get inlay-hint 'dape-symbols)
-    for (symbol value update) in  symbols
-    when value collect
-    (concat
-     (propertize (format "%s:" symbol)
-                 'face 'dape-inlay-hint-face
-                 'mouse-face 'highlight
-                 'keymap
-                 (let ((map (make-sparse-keymap))
-                       (sym symbol))
-                   (define-key map [mouse-1]
-                               (lambda (event)
-                                 (interactive "e")
-                                 (save-selected-window
-                                   (let ((start (event-start event)))
-                                     (select-window (posn-window start))
-                                     (save-excursion
-                                       (goto-char (posn-point start))
-                                       (dape-watch-dwim sym nil t))))))
-                   map)
-                 'help-echo
-                 (format "mouse-2: add `%s' to watch" symbol))
-     " "
-     (propertize (truncate-string-to-width
-                  (substring value 0 (string-match-p "\n" value))
-                  dape-inlay-hints-variable-name-max nil nil t)
-                 'help-echo value
-                 'face (if update 'dape-inlay-hint-highlight-face
-                         'dape-inlay-hint-face)))
-    into after-string finally do
-    (thread-last (mapconcat 'identity after-string dape--inlay-hint-seperator)
-                 (format "  %s")
-                 (overlay-put inlay-hint 'after-string)))))
+   (cl-loop with symbols = (overlay-get inlay-hint 'dape-symbols)
+            for (symbol value update) in symbols
+            when value collect
+            (concat
+             (propertize
+              (format "%s:" symbol)
+              'face 'dape-inlay-hint-face
+              'mouse-face 'highlight
+              'keymap
+              (let ((map (make-sparse-keymap))
+                    (sym symbol))
+                (define-key map [mouse-1]
+                            (lambda (event)
+                              (interactive "e")
+                              (save-selected-window
+                                (let ((start (event-start event)))
+                                  (select-window (posn-window start))
+                                  (save-excursion
+                                    (goto-char (posn-point start))
+                                    (dape-watch-dwim sym nil t))))))
+                map)
+              'help-echo
+              (format "mouse-2: add `%s' to watch" symbol))
+             " "
+             (propertize
+              (truncate-string-to-width
+               (substring value 0 (string-match-p "\n" value))
+               dape-inlay-hints-variable-name-max nil nil t)
+              'help-echo value
+              'face (if update 'dape-inlay-hint-highlight-face
+                      'dape-inlay-hint-face)))
+            into after-string finally do
+            (when after-string
+              (thread-last (mapconcat 'identity after-string
+                                      dape--inlay-hint-seperator)
+                           (format "  %s")
+                           (overlay-put inlay-hint 'after-string))))))
 
 (defun dape-inlay-hints-update ()
   "Update inlay hints."
@@ -4852,7 +4856,7 @@ Update `dape--inlay-hint-overlays' from SCOPES."
   (pcase-let*
       ((`(,key ,config ,error-message ,hint-rows) dape--minibuffer-cache)
        (str (string-trim (buffer-substring (minibuffer-prompt-end) (point-max))))
-       (`(,hint-key ,hint-config) (ignore-errors (dape--config-from-string str t)))
+       (`(,hint-key ,hint-config) (ignore-errors (dape--config-from-string str)))
        (default-directory
         (or (with-current-buffer dape--minibuffer-last-buffer
               (ignore-errors (dape--guess-root hint-config)))
@@ -5001,11 +5005,11 @@ configurations: %s"
                                      (seq-partition options 2)
                                      (copy-tree base-config)))))
 
-(defun dape--config-from-string (str &optional loose-parsing)
-  "Return list of ALIST-KEY CONFIG from STR.
-Expects STR format of \”ALIST-KEY PLIST-KEY PLIST-VALUE\” etc.
-Where ALIST-KEY exists in `dape-configs'.
-If LOOSE-PARSING is non nil ignore arg parsing failures."
+(defun dape--config-from-string (str)
+  "Return list of (KEY CONFIG) from STR.
+Expects STR format:
+\”ALIST-KEY KEY VALUE ... - ENV= PROGRAM ARG ...\”
+Where ALIST-KEY exists in `dape-configs'."
   (let ((buffer (current-buffer))
         name read-config base-config)
     (with-temp-buffer
@@ -5021,48 +5025,46 @@ If LOOSE-PARSING is non nil ignore arg parsing failures."
       (unless (alist-get name dape-configs)
         (user-error "No configuration named `%s'" name))
       (setq base-config (copy-tree (alist-get name dape-configs)))
-      (condition-case _
-          (while
-              ;; Do we have non whitespace chars after `point'?
-              (thread-first (buffer-substring (point) (point-max))
-                            (string-trim)
-                            (string-empty-p)
-                            (not))
-            (let ((thing (read (current-buffer))))
-              (cond
-               ((eq thing '-)
-                (cl-loop
-                 with command = (split-string-shell-command
-                                 (buffer-substring (point) (point-max)))
-                 with setvar = "\\`\\([A-Za-z_][A-Za-z0-9_]*\\)=\\(.*\\)\\'"
-                 for cell on command for (program . args) = cell
-                 when (string-match setvar program)
-                 append `(,(intern (concat ":" (match-string 1 program)))
-                          ,(match-string 2 program))
-                 into env and do (setq program nil)
-                 when (or (and (not program) (not args)) program) do
-                 (setq read-config
-                       (append (nreverse
-                                (append (when program `(:program ,program))
-                                        (when args `(:args ,(apply 'vector args)))
-                                        (when env `(:env ,env))))
-                               read-config))
-                 (throw 'done nil)))
-               (t
-                (push thing read-config)))))
-        (error
-         (unless loose-parsing
-           (user-error "Unable to parse options %s"
-                       (buffer-substring (point) (point-max)))))))
-    (when (and loose-parsing
-               (not (dape--plistp read-config)))
-      (pop read-config))
-    (setq read-config (nreverse read-config))
-    (unless (dape--plistp read-config)
-      (user-error "Bad options format, see `dape-configs'"))
-    (cl-loop for (key value) on read-config by 'cddr
-             do (setq base-config (plist-put base-config key value)))
-    (list name base-config)))
+      (ignore-errors
+        (while
+            ;; Do we have non whitespace chars after `point'?
+            (thread-first (buffer-substring (point) (point-max))
+                          (string-trim)
+                          (string-empty-p)
+                          (not))
+          (let ((thing (read (current-buffer))))
+            (cond
+             ((eq thing '-)
+              (cl-loop
+               with command = (split-string-shell-command
+                               (buffer-substring (point) (point-max)))
+               with setvar = "\\`\\([A-Za-z_][A-Za-z0-9_]*\\)=\\(.*\\)\\'"
+               for cell on command for (program . args) = cell
+               when (string-match setvar program)
+               append `(,(intern (concat ":" (match-string 1 program)))
+                        ,(match-string 2 program))
+               into env and do (setq program nil)
+               when (or (and (not program) (not args)) program) do
+               (setq read-config
+                     (append (nreverse
+                              (append (when program `(:program ,program))
+                                      (when args `(:args ,(apply 'vector args)))
+                                      (when env `(:env ,env))))
+                             read-config))
+               ;; Stop and eat rest of buffer
+               and return (goto-char (point-max))))
+             (t
+              (push thing read-config))))))
+      ;; Try to save half baked plist (value missing)
+      (when (not (dape--plistp read-config))
+        (pop read-config))
+      (unless (dape--plistp read-config)
+        (user-error "Bad options format, see `dape-configs'"))
+      (setq read-config (nreverse read-config))
+      ;; Apply properties from parsed PLIST to `dape-configs' item
+      (cl-loop for (key value) on read-config by 'cddr do
+               (setq base-config (plist-put base-config key value)))
+      (list name base-config))))
 
 (defun dape--config-diff (key post-eval)
   "Create a diff of config KEY and POST-EVAL config."
@@ -5181,16 +5183,19 @@ See `dape--config-mode-p' how \"valid\" is defined."
            ;; Take first valid history item
            (seq-find (lambda (str)
                        (ignore-errors
-                         (member (thread-first (dape--config-from-string str)
-                                               (car)
-                                               (dape--config-to-string nil))
-                                 suggested-configs)))
+                         (thread-first (dape--config-from-string str) (car)
+                                       (dape--config-to-string nil)
+                                       (member suggested-configs))))
                      dape-history)
            ;; Take first suggested config if only one exist
            (and (length= suggested-configs 1)
                 (car suggested-configs))))
-         (default-value (when initial-contents
-                          (concat (car (string-split initial-contents)) " "))))
+         (default-value
+          (when initial-contents
+            (pcase-let ((`(,key ,config) (dape--config-from-string initial-contents)))
+              (if dape-history-evaluated (format "%s " key)
+                (dape--config-to-string
+                 key (ignore-errors (dape--config-eval key config))))))))
     (setq dape--minibuffer-last-buffer (current-buffer)
           dape--minibuffer-cache nil)
     (minibuffer-with-setup-hook
@@ -5214,7 +5219,7 @@ See `dape--config-mode-p' how \"valid\" is defined."
           (dape--minibuffer-hint))
       (pcase-let*
           ((str
-            (let ((history-add-new-input nil))
+            (let ((history-add-new-input (not dape-history-evaluated)))
               (read-from-minibuffer
                "Run adapter: "
                initial-contents
@@ -5230,18 +5235,18 @@ See `dape--config-mode-p' how \"valid\" is defined."
                                (pcase-let*
                                    ((str (buffer-substring (minibuffer-prompt-end)
                                                            (point-max)))
-                                    (`(,key) (dape--config-from-string str t)))
+                                    (`(,key) (dape--config-from-string str)))
                                  (delete-region (minibuffer-prompt-end)
                                                 (point-max))
                                  (insert (format "%s" key) " "))))
                  map)
                nil 'dape-history default-value)))
            (`(,key ,config)
-            (dape--config-from-string (substring-no-properties str) t))
+            (dape--config-from-string (substring-no-properties str)))
            (evaled-config (dape--config-eval key config)))
-        (setq dape-history
-              (cons (dape--config-to-string key evaled-config)
-                    dape-history))
+        (when dape-history-evaluated
+          (setq dape-history (cons (dape--config-to-string key evaled-config)
+                                   dape-history)))
         evaled-config))))
 
 
