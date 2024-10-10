@@ -265,8 +265,7 @@
      modes (gdscript-mode)
      port 6006
      :request "launch"
-     :type "server"
-     :cwd dape-cwd)
+     :type "server")
     ,@(let ((js-debug
              `( ensure ,(lambda (config)
                           (dape-ensure-command config)
@@ -631,7 +630,7 @@ present in an group."
   :type 'boolean)
 
 (defcustom dape-info-variable-table-row-config
-  `((name . 20) (value . 50) (type . 20))
+  `((name . 0) (value . 0) (type . 0))
   "Configuration for table rows of variables.
 
 An alist that controls the display of the name, type and value of
