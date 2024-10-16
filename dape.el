@@ -727,7 +727,8 @@ The hook is run with one argument, the compilation buffer."
   :type 'hook)
 
 (defcustom dape-minibuffer-hint-ignore-properties
-  '(ensure fn modes command command-args command-env defer-launch-attach :type :request)
+  '( ensure fn modes command command-args command-env command-insert-stderr
+     defer-launch-attach :type :request)
   "Properties to be hidden in `dape--minibuffer-hint'."
   :type '(repeat symbol))
 
@@ -850,7 +851,7 @@ See `cl-destructuring-bind' for bind forms."
   (declare (indent 1))
   `(dape--with-request-bind (&rest _) ,fn-args ,@body))
 
-(defun dape--request-return (cb &optional error)
+(defun dape--request-continue (cb &optional error)
   "Shorthand to call CB with ERROR in an `dape-request' like way."
   (when (functionp cb)
     (funcall cb nil error)))
@@ -1579,14 +1580,14 @@ See `dape-request' for expected CB signature."
                (cl-loop for update across updates
                         for breakpoint in breakpoints do
                         (dape--breakpoint-update conn breakpoint update))
-               (dape--request-return cb error)))))
+               (dape--request-continue cb error)))))
 
 (defun dape--set-exception-breakpoints (conn &optional cb)
   "Set the exception breakpoints for adapter CONN.
 The exceptions are derived from `dape--exceptions'.
 See `dape-request' for expected CB signature."
   (if (not dape--exceptions)
-      (dape--request-return cb)
+      (dape--request-continue cb)
     (dape-request
      conn "setExceptionBreakpoints"
      `(:filters
@@ -1622,7 +1623,7 @@ See `dape-request' for expected CB signature."
                            :exceptionBreakpointFilters)))
   (dape--with-request (dape--set-exception-breakpoints conn)
     (run-hooks 'dape-update-ui-hook)
-    (dape--request-return cb)))
+    (dape--request-continue cb)))
 
 (defun dape--set-breakpoints (conn cb)
   "Set breakpoints for adapter CONN.
@@ -1636,8 +1637,8 @@ See `dape-request' for expected CB signature."
                (dape--with-request (dape--set-breakpoints-in-source conn buffer-or-path)
                  (setf responses (1+ responses))
                  (when (eq responses (length buffer-or-path-s))
-                   (dape--request-return cb))))
-    (dape--request-return cb)))
+                   (dape--request-continue cb))))
+    (dape--request-continue cb)))
 
 (defun dape--set-data-breakpoints (conn cb)
   "Set data breakpoints for adapter CONN.
@@ -1670,9 +1671,9 @@ See `dape-request' for expected CB signature."
          ;; FIXME Should not remove unverified-breakpoints as they
          ;;       might be verified by another live connection.
          (setq dape--data-breakpoints verfied-breakpoints))
-        (dape--request-return cb error))
+        (dape--request-continue cb error))
     (setq dape--data-breakpoints nil)
-    (dape--request-return cb)))
+    (dape--request-continue cb)))
 
 (defun dape--update-threads (conn cb)
   "Update threads for CONN in-place if possible.
@@ -1691,7 +1692,7 @@ See `dape-request' for expected CB signature."
                  (plist-put old-thread :name (plist-get new-thread :name))
                new-thread))
            (append threads nil)))
-    (dape--request-return cb error)))
+    (dape--request-continue cb error)))
 
 (defun dape--stack-trace (conn thread nof cb)
   "Update stack trace in THREAD plist with NOF frames by adapter CONN.
@@ -1706,7 +1707,7 @@ See `dape-request' for expected CB signature."
           (eql current-nof total-frames)
           (and delayed-stack-trace-p (<= nof current-nof))
           (and (not delayed-stack-trace-p) (> current-nof 0)))
-      (dape--request-return cb))
+      (dape--request-continue cb))
      (t
       (dape--with-request-bind
           ((&key stackFrames totalFrames &allow-other-keys) error)
@@ -1733,7 +1734,7 @@ See `dape-request' for expected CB signature."
                              nil))))
         (plist-put thread :totalFrames
                    (and (numberp totalFrames) totalFrames))
-        (dape--request-return cb error))))))
+        (dape--request-continue cb error))))))
 
 (defun dape--variables (conn object cb)
   "Update OBJECTs variables by adapter CONN.
@@ -1743,7 +1744,7 @@ See `dape-request' for expected CB signature."
             (zerop variables-reference)
             (plist-get object :variables)
             (not (jsonrpc-running-p conn)))
-        (dape--request-return cb)
+        (dape--request-continue cb)
       (dape--with-request-bind
           ((&key variables &allow-other-keys) _error)
           (dape-request conn
@@ -1754,7 +1755,7 @@ See `dape-request' for expected CB signature."
                    (thread-last variables
                                 (cl-map 'list 'identity)
                                 (seq-filter 'identity)))
-        (dape--request-return cb)))))
+        (dape--request-continue cb)))))
 
 
 (defun dape--variables-recursive (conn object path pred cb)
@@ -1767,7 +1768,7 @@ See `dape-request' for expected CB signature."
                      (or (plist-get object :scopes)
                          (plist-get object :variables)))))
     (if (not objects)
-        (dape--request-return cb)
+        (dape--request-continue cb)
       (let ((responses 0))
         (dolist (object objects)
           (dape--with-request (dape--variables conn object)
@@ -1778,7 +1779,7 @@ See `dape-request' for expected CB signature."
                                            pred)
               (when (length= objects
                              (setf responses (1+ responses)))
-                (dape--request-return cb)))))))))
+                (dape--request-continue cb)))))))))
 
 (defun dape--evaluate-expression (conn frame-id expression context cb)
   "Send evaluate request to adapter CONN.
@@ -1846,8 +1847,8 @@ See `dape-request' for expected CB signature."
           ((&key scopes &allow-other-keys) error)
           (dape-request conn "scopes" (list :frameId id))
         (plist-put stack-frame :scopes (append scopes nil))
-        (dape--request-return cb error))
-    (dape--request-return cb)))
+        (dape--request-continue cb error))
+    (dape--request-continue cb)))
 
 (defun dape--update (conn clear display)
   "Update adapter CONN data and UI.
@@ -1956,13 +1957,20 @@ BODY is an plist of adapter capabilities."
 Update `dape--breakpoints' according to BODY."
   (when-let ((update (plist-get body :breakpoint))
              (id (plist-get update :id)))
+    ;; Until `:reason' gets properly speced, try to infer update
+    ;; intention, would prefer `pcase' on `:reason'.
     (if-let ((breakpoint
               (cl-find id dape--breakpoints
                        :key (lambda (breakpoint)
                               (plist-get (dape--breakpoint-id breakpoint) conn)))))
         (dape--breakpoint-update conn breakpoint update)
-      ;; TODO Breakpoint event should be able to create breakpoints
-      )))
+      (unless (equal (plist-get body :reason) "removed")
+        (dape--with-request (dape--source-ensure conn update)
+          (when-let ((marker (dape--object-to-marker conn update)))
+            (dape--with-line (marker-buffer marker) (plist-get update :line)
+              (dape--message "Creating breakpoint in %s:%d"
+                             (buffer-name) (plist-get update :line))
+              (dape--breakpoint-place))))))))
 
 (cl-defmethod dape-handle-event (conn (_event (eql module)) body)
   "Handle adapter CONNs module events.
@@ -2371,7 +2379,7 @@ terminate.  CONN is inferred for interactive invocations."
       (if (and error (not (eq error dape--timeout-error)))
           (dape-kill cb 'with-disconnect)
         (jsonrpc-shutdown conn)
-        (dape--request-return cb))))
+        (dape--request-continue cb))))
    ((and conn (jsonrpc-running-p conn))
     (dape--with-request
         (dape-request conn "disconnect"
@@ -2379,9 +2387,9 @@ terminate.  CONN is inferred for interactive invocations."
                          ,@(when (dape--capable-p conn :supportTerminateDebuggee)
                              '(:terminateDebuggee t))))
       (jsonrpc-shutdown conn)
-      (dape--request-return cb)))
+      (dape--request-continue cb)))
    (t
-    (dape--request-return cb))))
+    (dape--request-continue cb))))
 
 (defun dape-disconnect-quit (conn)
   "Kill adapter but try to keep debuggee live.
@@ -3082,9 +3090,9 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
     (pcase-let ((`(,buffer-or-path . ,line)
                  (dape--breakpoint-buffer-or-path-line breakpoint)))
       ;; XXX Breakpoint overlay might be dead at this point as
-      ;;     another invocation of `dape--breakpoint-update' might
-      ;;     have deleted it.  If that is the reason for missing
-      ;;     buffer we are fine.
+      ;;     another invocation of `dape--breakpoint-update' could
+      ;;     have deleted it.  If that is the reason for nil buffer we
+      ;;     are fine.
       (when-let* (buffer-or-path
                   ;; TODO Here we go opening buffers anyway, no good.
                   (buffer (if (bufferp buffer-or-path) buffer-or-path
@@ -3178,7 +3186,7 @@ See `dape-request' for expected CB signature."
     (cond
      ((or (and (stringp path) (file-exists-p (dape--path-local conn path)) path)
           (and (buffer-live-p buffer) buffer))
-      (dape--request-return cb))
+      (dape--request-continue cb))
      ((and (numberp refrence) (< 0 refrence) refrence)
       (dape--with-request-bind
           ((&key content mimeType &allow-other-keys) error)
@@ -3205,7 +3213,7 @@ See `dape-request' for expected CB signature."
                      (erase-buffer)
                      (insert content))
                    (goto-char (point-min)))
-                 (dape--request-return cb)))))))))
+                 (dape--request-continue cb)))))))))
 
 
 ;;; Stack frame source
@@ -3748,7 +3756,7 @@ See `dape-request' for expected CB signature."
     (cond
      ;; Current CONN is benched
      ((member conn dape-info--threads-bench)
-      (dape--request-return cb))
+      (dape--request-continue cb))
      ;; Stopped threads
      ((setq threads
             (cl-remove-if (lambda (thread)
@@ -3777,9 +3785,9 @@ See `dape-request' for expected CB signature."
               (push conn dape-info--threads-bench))
             ;; When all request have resolved return
             (when (length= threads (setf responses (1+ responses)))
-              (dape--request-return cb))))))
+              (dape--request-continue cb))))))
      ;; No stopped threads
-     (t (dape--request-return cb))))
+     (t (dape--request-continue cb))))
   ;; House keeping, no need to keep dead connections in bench
   (when dape-info--threads-bench
     (let ((conns (dape--live-connections)))
@@ -5065,9 +5073,10 @@ Where ALIST-KEY exists in `dape-configs'."
         (user-error "Bad options format, see `dape-configs'"))
       (setq read-config (nreverse read-config))
       ;; Apply properties from parsed PLIST to `dape-configs' item
-      (cl-loop for (key value) on read-config by 'cddr do
-               (setq base-config (plist-put base-config key value)))
-      (list name base-config))))
+      (cl-loop for (key value) on base-config by 'cddr
+               unless (plist-member read-config key) do
+               (setq read-config (plist-put read-config key value)))
+      (list name read-config))))
 
 (defun dape--config-diff (key post-eval)
   "Create a diff of config KEY and POST-EVAL config."
