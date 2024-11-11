@@ -154,13 +154,9 @@
            command-args ("--port" :autoport
                          "--settings" "{\"sourceLanguages\":[\"rust\"]}")
            ,@codelldb
-           :program (lambda ()
-                      (file-name-concat "target" "debug"
-                                        (thread-first (dape-cwd)
-                                                      (directory-file-name)
-                                                      (file-name-split)
-                                                      (last)
-                                                      (car))))
+           :program (file-name-concat "target" "debug"
+                                      (car (last (file-name-split
+                                                  (directory-file-name (dape-cwd))))))
            ,@common)))
     (cpptools
      modes (c-mode c-ts-mode c++-mode c++-ts-mode)
@@ -210,12 +206,8 @@
                    :program dape-buffer-default
                    ,@common)
           (debugpy-module ,@debugpy
-                          :module (lambda ()
-                                    (thread-first default-directory
-                                                  (directory-file-name)
-                                                  (file-name-split)
-                                                  (last)
-                                                  (car)))
+                          :module (car (last (file-name-split
+                                              (directory-file-name default-directory))))
                           ,@common)))
     (dlv
      modes (go-mode go-ts-mode)
@@ -312,7 +304,9 @@
            :url "http://localhost:3000"
            :webRoot dape-cwd)))
     ,@(let ((lldb-common
-             `( modes (c-mode c-ts-mode c++-mode c++-ts-mode rust-mode rust-ts-mode rustic-mode)
+             `( modes ( c-mode c-ts-mode
+                        c++-mode c++-ts-mode
+                        rust-mode rust-ts-mode rustic-mode)
                 ensure dape-ensure-command
                 command-cwd dape-command-cwd
                 :cwd "."
@@ -332,15 +326,11 @@
      command-args ["--interpreter=vscode"]
      :request "launch"
      :cwd dape-cwd
-     :program (lambda ()
-                (let ((dlls
-                       (file-expand-wildcards
-                        (file-name-concat "bin" "Debug" "*" "*.dll"))))
-                  (if dlls
-                      (file-relative-name
-                       (file-relative-name (car dlls)))
-                    ".dll"
-                    (dape-cwd))))
+     :program (if-let ((dlls
+                        (file-expand-wildcards
+                         (file-name-concat "bin" "Debug" "*" "*.dll"))))
+                  (file-relative-name (file-relative-name (car dlls)))
+                ".dll")
      :stopAtEntry nil)
     (ocamlearlybird
      ensure dape-ensure-command
@@ -348,13 +338,8 @@
      command "ocamlearlybird"
      command-args ("debug")
      :type "ocaml"
-     :program (lambda ()
-                (file-name-concat
-                 (dape-cwd)
-                 "_build" "default" "bin"
-                 (concat
-                  (file-name-base (dape-buffer-default))
-                  ".bc")))
+     :program (file-name-concat (dape-cwd) "_build" "default" "bin"
+                                (concat (file-name-base (dape-buffer-default)) ".bc"))
      :console "internalConsole"
      :stopOnEntry nil
      :arguments [])
@@ -377,9 +362,7 @@
      ;; rails server
      ;; bundle exec ruby foo.rb
      ;; bundle exec rake test
-     -c (lambda ()
-          (format "ruby %s"
-                  (or (dape-buffer-default) ""))))
+     -c (concat "ruby " (dape-buffer-default)))
     (jdtls
      modes (java-mode java-ts-mode)
      ensure (lambda (config)
@@ -527,6 +510,10 @@ Functions and symbols:
                         ((const :tag "Use configurationDone as trigger for launch/attach" defer-launch-attach) boolean)
                         ((const :tag "Adapter type" :type) string)
                         ((const :tag "Request type launch/attach" :request) string)))))
+
+(defcustom dape-config-dash-form-p nil
+  "If ENV PROGRAM ARGS sh like string format is preferred."
+  :type 'boolean)
 
 (defcustom dape-default-config-functions
   '(dape-config-autoport dape-config-tramp)
@@ -747,12 +734,6 @@ The hook is run with one argument, the compilation buffer."
 
 (defcustom dape-minibuffer-hint t
   "Show `dape-configs' hints in minibuffer."
-  :type 'boolean)
-
-(defcustom dape-history-evaluated t
-  "Keep `dape-history' configurations evaluated.
-Non-nil means each configuration read in command `dape' will be
-evaluated before being pushed to `dape-history'."
   :type 'boolean)
 
 (defcustom dape-ui-debounce-time 0.1
@@ -3748,8 +3729,10 @@ displayed."
 
 (defvar dape--info-thread-position nil
   "`dape-info-thread-mode' marker for `overlay-arrow-variable-list'.")
-(defvar dape-info--threads-bench nil
-  "List of benched connections.")
+(defvar-local dape--info-threads-fetch-other-threads-p nil
+  ;; XXX Workaround for some adapters seemingly not being able to
+  ;;     handle parallel stack traces.
+  "If non nil skip fetching thread information for other threads.")
 (defvar dape-info--threads-tt-bench 2
   "Time to Bench.")
 
@@ -3774,7 +3757,7 @@ See `dape-request' for expected CB signature."
   (let (threads)
     (cond
      ;; Current CONN is benched
-     ((member conn dape-info--threads-bench)
+     (dape--info-threads-fetch-other-threads-p
       (dape--request-continue cb))
      ;; Stopped threads
      ((setq threads
@@ -3793,25 +3776,17 @@ See `dape-request' for expected CB signature."
           (dape--with-request (dape--stack-trace conn thread 1)
             (plist-put thread :request-in-flight nil)
             ;; Time response, if slow bench that CONN
-            (when (and (time-less-p (timer-relative-time
+            (when (and (not dape--info-threads-fetch-other-threads-p)
+                       (time-less-p (timer-relative-time
                                      start-time dape-info--threads-tt-bench)
-                                    (current-time))
-                       (not (member conn dape-info--threads-bench)))
-              ;; TODO Apply to all future connections independent on
-              ;;      type
-              (dape--warn
-               "Disabling stack trace info in Threads buffer for connection (slow)")
-              (push conn dape-info--threads-bench))
+                                    (current-time)))
+              (dape--warn "Disabling stack trace info in Threads buffer (slow)")
+              (setq dape--info-threads-fetch-other-threads-p t))
             ;; When all request have resolved return
             (when (length= threads (setf responses (1+ responses)))
               (dape--request-continue cb))))))
      ;; No stopped threads
-     (t (dape--request-continue cb))))
-  ;; House keeping, no need to keep dead connections in bench
-  (when dape-info--threads-bench
-    (let ((conns (dape--live-connections)))
-      (cl-delete-if-not (lambda (conn) (member conn conns))
-                        dape-info--threads-bench))))
+     (t (dape--request-continue cb)))))
 
 (define-derived-mode dape-info-threads-mode dape-info-parent-mode "Threads"
   "Major mode for dape info threads."
@@ -5105,12 +5080,26 @@ Where ALIST-KEY exists in `dape-configs'."
 
 (defun dape--config-to-string (key post-eval-config)
   "Create string from KEY and POST-EVAL-CONFIG."
-  (let ((config-diff (dape--config-diff key post-eval-config)))
+  (pcase-let* ((config-diff (dape--config-diff key post-eval-config))
+               ((map :env :program :args) config-diff)
+               (zap-form-p (and dape-config-dash-form-p
+                                (or program (and env (not args))))))
+    (when zap-form-p
+      (cl-loop for key in '(:program :env :args) do
+               (setq config-diff (map-delete config-diff key))))
     (concat (when key (format "%s" key))
-            (and-let* ((config-diff)
+            (when-let ((config-diff)
                        (config-str (prin1-to-string config-diff)))
-              (format " %s"
-                      (substring config-str 1 (1- (length config-str))))))))
+              (format " %s" (substring config-str 1 (1- (length config-str)))))
+            (when zap-form-p
+              (concat " -"
+                      (cl-loop for (symbol value) on env by #'cddr
+                               for name = (substring (symbol-name symbol) 1)
+                               concat (format " %s=%s"
+                                              (shell-quote-argument name)
+                                              (shell-quote-argument value)))
+                      (cl-loop for arg in (cons program (append args nil)) concat
+                               (format " %s" (shell-quote-argument arg))))))))
 
 (defun dape--config-ensure (config &optional signal)
   "Ensure that CONFIG is executable.
@@ -5142,10 +5131,11 @@ nil."
 
 (defun dape--config-completion-at-point ()
   "Function for `completion-at-point' fn for `dape--read-config'."
-  (let (key args args-bounds last-p)
+  (let (key key-end args args-bounds last-p)
     (save-excursion
       (goto-char (minibuffer-prompt-end))
       (setq key (ignore-errors (read (current-buffer))))
+      (setq key-end (point))
       (ignore-errors
         (while t
           (setq last-p (point))
@@ -5155,9 +5145,7 @@ nil."
           args-bounds (nreverse args-bounds))
     (cond
      ;; Complete config key
-     ((or (not key)
-          (and (not args)
-               (thing-at-point 'symbol)))
+     ((<= (point) key-end)
       (pcase-let ((`(,start . ,end)
                    (or (bounds-of-thing-at-point 'symbol)
                        (cons (point) (point)))))
@@ -5212,12 +5200,8 @@ See `dape--config-mode-p' how \"valid\" is defined."
            ;; Take first suggested config if only one exist
            (and (length= suggested-configs 1)
                 (car suggested-configs))))
-         (default-value
-          (when initial-contents
-            (pcase-let ((`(,key ,config) (dape--config-from-string initial-contents)))
-              (if dape-history-evaluated (format "%s " key)
-                (dape--config-to-string
-                 key (ignore-errors (dape--config-eval key config))))))))
+         (default-value (when initial-contents
+                          (concat (car (string-split initial-contents)) " "))))
     (setq dape--minibuffer-last-buffer (current-buffer)
           dape--minibuffer-cache nil)
     (minibuffer-with-setup-hook
@@ -5241,7 +5225,7 @@ See `dape--config-mode-p' how \"valid\" is defined."
           (dape--minibuffer-hint))
       (pcase-let*
           ((str
-            (let ((history-add-new-input (not dape-history-evaluated)))
+            (let ((history-add-new-input nil))
               (read-from-minibuffer
                "Run adapter: "
                initial-contents
@@ -5266,9 +5250,8 @@ See `dape--config-mode-p' how \"valid\" is defined."
            (`(,key ,config)
             (dape--config-from-string (substring-no-properties str)))
            (evaled-config (dape--config-eval key config)))
-        (when dape-history-evaluated
-          (setq dape-history (cons (dape--config-to-string key evaled-config)
-                                   dape-history)))
+        (setq dape-history (cons (dape--config-to-string key evaled-config)
+                                 dape-history))
         evaled-config))))
 
 
@@ -5367,7 +5350,7 @@ mouse-1: Display minor mode menu"
                     help-echo "Active child connections")))))))
 
 (add-to-list 'mode-line-misc-info
-             `(dape-active-mode ("[" dape--mode-line-format "]")))
+             `(dape-active-mode ("[" dape--mode-line-format "] ")))
 
 
 ;;; Keymaps
