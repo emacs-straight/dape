@@ -4611,16 +4611,11 @@ Send INPUT to DUMMY-PROCESS."
        (goto-char (car bounds))
        (looking-back (regexp-opt trigger-chars) line-start)))))
 
-(defvar dape-repl-mode nil)
-
 (define-derived-mode dape-repl-mode comint-mode "REPL"
   "Mode for *dape-repl* buffer."
   :group 'dape
   :interactive nil
-  (when dape-repl-mode
-    (user-error "`dape-repl-mode' all ready enabled"))
-  (setq-local dape-repl-mode t
-              comint-prompt-read-only t
+  (setq-local comint-prompt-read-only t
               comint-scroll-to-bottom-on-input t
               ;; HACK ? Always keep prompt at the bottom of the window
               scroll-conservatively 101
@@ -4666,7 +4661,7 @@ Empty input will rerun last command.\n\n"
   (let ((buffer-name "*dape-repl*")
         window)
     (with-current-buffer (get-buffer-create buffer-name)
-      (unless dape-repl-mode
+      (unless (eq major-mode 'dape-repl-mode)
         (dape-repl-mode))
       (setq window (dape--display-buffer (current-buffer)))
       (when (called-interactively-p 'interactive)
@@ -5083,7 +5078,9 @@ Where ALIST-KEY exists in `dape-configs'."
   (pcase-let* ((config-diff (dape--config-diff key post-eval-config))
                ((map :env :program :args) config-diff)
                (zap-form-p (and dape-config-dash-form-p
-                                (or program (and env (not args))))))
+                                (or (stringp program)
+                                    (and (consp env) (keywordp (car env))
+                                         (not args))))))
     (when zap-form-p
       (cl-loop for key in '(:program :env :args) do
                (setq config-diff (map-delete config-diff key))))
