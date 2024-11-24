@@ -472,6 +472,10 @@ Symbol keys (Used by dape):
   interpretations of the DAP specification.
   See: GDB bug 32090.
 
+Note: The char - carries special meaning when reading options in
+`dape' and therefore should not be used be used as an key.
+See `dape-config-dash-form'.
+
 Connection to Debug Adapter:
 - If command is specified and not port, dape communicates with the
   debug adapter through stdin/stdout.
@@ -511,8 +515,15 @@ Functions and symbols:
                         ((const :tag "Adapter type" :type) string)
                         ((const :tag "Request type launch/attach" :request) string)))))
 
-(defcustom dape-config-dash-form-p nil
-  "If ENV PROGRAM ARGS sh like string format is preferred."
+(defcustom dape-config-dash-form t
+  "If non nil store configurations in dash form in `dape-history'.
+With dash form - switches the reader modes from properties and
+values to sh like format ENV PROGRAM ARGS.
+
+This is useful for adapters which follows the
+`:program', `:env' and `:args' convention.
+
+Example: debugpy - ENV=value program arg1 arg2"
   :type 'boolean)
 
 (defcustom dape-default-config-functions
@@ -671,10 +682,6 @@ left-to-right display order of the properties."
   :type '(choice (const :tag "Truncate string at new line" line)
                  (const :tag "No formatting" nil)))
 
-(defcustom dape-info-header-scope-max-name 15
-  "Max length of scope name in `header-line-format'."
-  :type 'integer)
-
 (defcustom dape-info-file-name-max 25
   "Max length of file name in dape info buffers."
   :type 'integer)
@@ -745,7 +752,8 @@ The hook is run with one argument, the compilation buffer."
   :type 'natnum)
 
 (defcustom dape-debug nil
-  "Print debug info in *dape-repl* *dape-connection events* buffers."
+  "If non nil log debug info in repl and connection events buffers.
+Debug logging has an noticeable effect on performance."
   :type 'boolean)
 
 
@@ -1226,7 +1234,7 @@ On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
 
 (defmacro dape--buffer-map (name fn &rest body)
   "Helper macro to create info buffer map with NAME.
-FN is executed on mouse-2 and \r, BODY is executed with `map' bound."
+FN is executed on mouse-2 and \\r, BODY is executed with `map' bound."
   (declare (indent defun))
   `(defvar ,name
      (let ((map (make-sparse-keymap)))
@@ -2794,8 +2802,6 @@ Using BUFFER and STR."
   ;; TODO Look for alternatives to hexl, which handles address offsets
   (add-hook 'eldoc-documentation-functions
             #'dape--memory-print-current-point-info nil t)
-  ;; FIXME Is `revert-buffer-in-progress-p' is not respected
-  ;;       as most of the work is done in an callback.
   (setq revert-buffer-function #'dape--memory-revert))
 
 (define-key dape-memory-mode-map "\C-x]" #'dape-memory-next-page)
@@ -2949,6 +2955,13 @@ of memory read."
   :global t
   :lighter nil)
 
+(defun dape--breakpoint-maybe-remove-ff-hook ()
+  "Remove `find-file-hook' if all breakpoints have buffers."
+  (cl-loop for breakpoint in dape--breakpoints
+           always (bufferp (dape--breakpoint-source breakpoint))
+           finally do (remove-hook 'find-file-hook
+                                   #'dape--breakpoint-find-file-hook)))
+
 (defun dape--breakpoint-find-file-hook ()
   "Convert cons breakpoints into overlay breakpoints.
 Used as an hook on `find-file-hook'."
@@ -2961,7 +2974,9 @@ Used as an hook on `find-file-hook'."
              for line = (dape--breakpoint-line breakpoint)
              unless (dape--breakpoint-buffer breakpoint) do
              (dape--with-line (current-buffer) line
-               (dape--breakpoint-set-overlay breakpoint)))))
+               (dape--breakpoint-set-overlay breakpoint))
+             (run-hooks 'dape-update-ui-hook)))
+  (dape--breakpoint-maybe-remove-ff-hook))
 
 (defvar dape--original-margin nil
   "Bookkeeping for buffer margin width.")
@@ -3036,7 +3051,6 @@ If FROM-RESTART is non nil keep id and verified."
            if (buffer-file-name (current-buffer)) do
            (with-slots (overlay) breakpoint
              (when overlay
-               ;; TODO Remove dape--breakpoint-find-file-hook
                (add-hook 'find-file-hook #'dape--breakpoint-find-file-hook)
                (delete-overlay overlay))
              (setf overlay nil)
@@ -3090,6 +3104,7 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
   (unless skip-update
     (dape--breakpoint-broadcast-update (dape--breakpoint-source breakpoint)))
   (dape--breakpoint-delete-overlay breakpoint)
+  (dape--breakpoint-maybe-remove-ff-hook)
   (run-hooks 'dape-update-ui-hook))
 
 (defun dape--breakpoint-source (breakpoint)
@@ -3151,7 +3166,6 @@ Will use `dape-default-breakpoints-file' if FILE is nil."
                (dape--with-line (find-file-noselect file) line
                  (dape--breakpoint-place type value)))
               (t
-               ;; TODO Remove dape--breakpoint-find-file-hook
                (add-hook 'find-file-hook #'dape--breakpoint-find-file-hook)
                (push (dape--breakpoint-make
                       :path-line (cons file line) :type type :value value)
@@ -3404,9 +3418,6 @@ Each buffers store its own debounce context."
               truncate-lines t
               cursor-in-non-selected-windows nil
               dape--info-debounce-timer (timer-create)
-              ;; FIXME Is `revert-buffer-in-progress-p' is not
-              ;;       respected as most of the work is done in an
-              ;;       callback.
               revert-buffer-function #'dape--info-revert)
   (add-hook 'window-buffer-change-functions 'dape--info-buffer-change-fn
             nil 'local)
@@ -5081,7 +5092,7 @@ Where ALIST-KEY exists in `dape-configs'."
   "Create string from KEY and POST-EVAL-CONFIG."
   (pcase-let* ((config-diff (dape--config-diff key post-eval-config))
                ((map :env :program :args) config-diff)
-               (zap-form-p (and dape-config-dash-form-p
+               (zap-form-p (and dape-config-dash-form
                                 (or (stringp program)
                                     (and (consp env) (keywordp (car env))
                                          (not args))))))
