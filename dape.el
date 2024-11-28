@@ -1505,39 +1505,42 @@ timeout period is configurable with `dape-request-timeout'"
       (unless (plist-get (dape--config conn) 'defer-launch-attach)
         (dape--launch-or-attach conn)))))
 
+(defun dape--launch-or-attach-arguments (conn)
+  "Return plist of launch/attach arguments for CONN."
+  ;; Transform config to jsonrpc serializable format
+  ;; Remove all non `keywordp' keys and transform null to
+  ;; :json-false
+  (cl-labels
+      ((transform-value (value)
+         (pcase value
+           ('nil :json-false)
+           ;; FIXME Need a way to create json null values
+           ;;       see #72, :null could be an candidate.
+           ;;       Using :null is quite harmless as it has
+           ;;       no friction with `dape-configs'
+           ;;       evaluation.  So it should be fine to keep
+           ;;       supporting it even if it's not the way
+           ;;       forwards.
+           (:null
+            nil)
+           ((pred vectorp)
+            (cl-map 'vector #'transform-value value))
+           ((pred listp)
+            (create-body value))
+           (_ value)))
+       (create-body (config)
+         (cl-loop for (key value) on config by 'cddr
+                  when (keywordp key)
+                  append (list key (transform-value value)))))
+    (create-body (dape--config conn))))
+
 (defun dape--launch-or-attach (conn)
   "Launch or attach CONN."
   (dape--with-request-bind
       (_body error)
-      (dape-request
-       conn
-       (or (plist-get (dape--config conn) :request) "launch")
-       ;; Transform config to jsonrpc serializable format
-       ;; Remove all non `keywordp' keys and transform null to
-       ;; :json-false
-       (cl-labels
-           ((transform-value (value)
-              (pcase value
-                ('nil :json-false)
-                ;; FIXME Need a way to create json null values
-                ;;       see #72, :null could be an candidate.
-                ;;       Using :null is quite harmless as it has
-                ;;       no friction with `dape-configs'
-                ;;       evaluation.  So it should be fine to keep
-                ;;       supporting it even if it's not the way
-                ;;       forwards.
-                (:null
-                 nil)
-                ((pred vectorp)
-                 (cl-map 'vector #'transform-value value))
-                ((pred listp)
-                 (create-body value))
-                (_ value)))
-            (create-body (config)
-              (cl-loop for (key value) on config by 'cddr
-                       when (keywordp key)
-                       append (list key (transform-value value)))))
-         (create-body (dape--config conn))))
+      (dape-request conn
+                    (or (plist-get (dape--config conn) :request) "launch")
+                    (dape--launch-or-attach-arguments conn))
     (when error
       (dape--warn "%s" error)
       (dape-kill conn))))
@@ -2378,9 +2381,9 @@ CONN is inferred for interactive invocations."
                (dape--modules conn) nil
                (dape--sources conn) nil
                (dape--restart-in-progress-p conn) t)
-         ;; FIXME This is not according to spec should give
-         ;;       launch/attach args
-         (dape--with-request (dape-request conn "restart" nil)
+         (dape--with-request
+             (dape-request conn "restart"
+                           `(:arguments ,(dape--launch-or-attach-arguments conn)))
            (setf (dape--restart-in-progress-p conn) nil)))
         (dape-history
          (dape (apply 'dape--config-eval (dape--config-from-string (car dape-history)))))
@@ -3972,7 +3975,8 @@ current buffer with CONN config."
 ;;; Info modules buffer
 
 (defvar dape--info-modules-font-lock-keywords
-  '(("^\\([^ ]+\\) "  (1 font-lock-function-name-face)))
+  '(("^No" (1 default)) ;; Skip fontification of placeholder string
+    ("^\\([^ ]+\\) "  (1 font-lock-function-name-face)))
   "Font lock keywords used in `gdb-frames-mode'.")
 
 (dape--command-at-line dape-info-modules-goto (dape--info-module)
@@ -3990,18 +3994,20 @@ current buffer with CONN config."
 (define-derived-mode dape-info-modules-mode dape-info-parent-mode "Modules"
   "Major mode for Dape info modules."
   :interactive nil
-  (setq font-lock-defaults '(dape--info-modules-font-lock-keywords)))
+  (setq font-lock-defaults '(dape--info-modules-font-lock-keywords))
+  (dape--info-update-with
+    (insert "No modules available.")))
 
 (cl-defmethod dape--info-revert (&context (major-mode (eql dape-info-modules-mode))
                                           &optional _ignore-auto _noconfirm _preserve-modes)
   "Revert buffer function for MAJOR-MODE `dape-info-modules-mode'."
-  (dape--info-update-with
-    ;; Use last connection if current is dead
-    (when-let ((conn (or (dape--live-connection 'stopped t)
-                         (dape--live-connection 'last t)
-                         dape--connection)))
-      (cl-loop with modules = (dape--modules conn)
-               with table = (make-gdb-table)
+  ;; Use last connection if current is dead
+  (when-let* ((conn (or (dape--live-connection 'stopped t)
+                        (dape--live-connection 'last t)
+                        dape--connection))
+              (modules (dape--modules conn)))
+    (dape--info-update-with
+      (cl-loop with table = (make-gdb-table)
                for module in (reverse modules) do
                (gdb-table-add-row
                 table
@@ -4038,18 +4044,20 @@ current buffer with CONN config."
 
 (define-derived-mode dape-info-sources-mode dape-info-parent-mode "Sources"
   "Major mode for Dape info sources."
-  :interactive nil)
+  :interactive nil
+  (dape--info-update-with
+    (insert "No sources available.")))
 
 (cl-defmethod dape--info-revert (&context (major-mode (eql dape-info-sources-mode))
                                           &optional _ignore-auto _noconfirm _preserve-modes)
   "Revert buffer function for MAJOR-MODE `dape-info-sources-mode'."
-  (dape--info-update-with
-    ;; Use last connection if current is dead
-    (when-let ((conn (or (dape--live-connection 'stopped t)
-                         (dape--live-connection 'last t)
-                         dape--connection)))
-      (cl-loop with sources = (dape--sources conn)
-               with table = (make-gdb-table)
+  ;; Use last connection if current is dead
+  (when-let* ((conn (or (dape--live-connection 'stopped t)
+                        (dape--live-connection 'last t)
+                        dape--connection))
+              (sources (dape--sources conn)))
+    (dape--info-update-with
+      (cl-loop with table = (make-gdb-table)
                for source in (reverse sources) do
                (gdb-table-add-row
                 table (list (concat (plist-get source :name) " "))
