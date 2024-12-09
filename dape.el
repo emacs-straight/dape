@@ -2655,7 +2655,7 @@ CONN is inferred by either last stopped or last created connection."
      (error
       (if (string-empty-p error)
           (dape--warn "Failed to evaluate %S" (substring-no-properties expression))
-        (dape--warn error)))
+        (dape--repl-insert-error (concat (string-trim-right error) "\n"))))
      ((and (get-buffer "*dape-repl*")
            (numberp variablesReference)
            (not (zerop variablesReference)))
@@ -3677,8 +3677,8 @@ without log or expression breakpoint"))))))
 (dape--buffer-map dape-info-exceptions-line-map dape-info-exceptions-toggle)
 
 (defvar dape--info-breakpoints-font-lock-keywords
-  '(("^\\(y\\)"  (1 font-lock-warning-face))
-    ("^\\(n\\)"  (1 font-lock-doc-face)))
+  '(("^ *\\(y\\)"  (1 font-lock-warning-face))
+    ("^ *\\(n\\)"  (1 font-lock-doc-face)))
   "Keywords for `dape-info-breakpoints-mode'.")
 
 (define-derived-mode dape-info-breakpoints-mode dape-info-parent-mode "Breakpoints"
