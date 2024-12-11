@@ -52,13 +52,11 @@
 (require 'comint)
 (require 'repeat)
 (require 'compile)
-(require 'tree-widget)
 (require 'project)
 (require 'gdb-mi)
 (require 'hexl)
 (require 'tramp)
 (require 'jsonrpc)
-(require 'eglot) ;; jdtls config
 
 
 ;;; Obsolete aliases
@@ -368,9 +366,9 @@
      ensure (lambda (config)
               (let ((file (dape-config-get config :filePath)))
                 (unless (and (stringp file) (file-exists-p file))
-                  (user-error "Unable to find locate :filePath `%s'" file))
+                  (user-error "Unable to locate :filePath `%s'" file))
                 (with-current-buffer (find-file-noselect file)
-                  (unless (eglot-current-server)
+                  (unless (and (featurep 'eglot) (eglot-current-server))
                     (user-error "No eglot instance active in buffer %s" (current-buffer)))
                   (unless (seq-contains-p (eglot--server-capable :executeCommandProvider :commands)
         			          "vscode.java.resolveClasspath")
@@ -394,10 +392,12 @@
      ,@(cl-flet ((resolve-main-class (key)
                    (ignore-errors
                      (let* ((main-classes
-                             (eglot-execute-command (eglot-current-server)
-                                                    "vscode.java.resolveMainClass"
-                                                    (file-name-nondirectory
-                                                     (directory-file-name (dape-cwd)))))
+                             (with-no-warnings
+                               (eglot-execute-command
+                                (eglot-current-server)
+                                "vscode.java.resolveMainClass"
+                                (file-name-nondirectory
+                                 (directory-file-name (dape-cwd))))))
                             (main-class
                              (or (seq-find (lambda(val)
                                              (equal (plist-get val :filePath)
@@ -410,11 +410,9 @@
               (or (resolve-main-class :filePath)
                   (expand-file-name (dape-buffer-default) (dape-cwd))))
            :mainClass
-           ,(lambda ()
-              (or (resolve-main-class :mainClass) ""))
+           ,(lambda () (resolve-main-class :mainClass))
            :projectName
-           ,(lambda ()
-              (or (resolve-main-class :projectName) ""))))
+           ,(lambda () (resolve-main-class :projectName))))
      :args ""
      :stopOnEntry nil
      :type "java"
@@ -693,6 +691,7 @@ left-to-right display order of the properties."
     ("modules" . dape-list-modules)
     ("sources" . dape-list-sources)
     ("breakpoints" . dape-list-breakpoints)
+    ("scope" . dape-list-scope)
     ("restart" . dape-restart)
     ("kill" . dape-kill)
     ("disconnect" . dape-disconnect-quit)
@@ -721,7 +720,8 @@ project's root.  See `dape--default-cwd'."
 
 (defcustom dape-compile-hook nil
   "Called after dape compilation finishes.
-The hook is run with one argument, the compilation buffer."
+The hook is run with one argument, the compilation buffer when
+compilation is successful."
   :type 'hook)
 
 (defcustom dape-minibuffer-hint-ignore-properties
@@ -2594,6 +2594,10 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
 (defun dape-stack-select-up (conn n)
   "Select N stacks above current selected stack for adapter CONN."
   (interactive (list (dape--live-connection 'stopped) 1))
+  ;; Ensure all threads.  See `dape--stack-trace'.
+  (let ((dape--request-blocking t))
+    (dape--with-request
+        (dape--stack-trace conn (dape--current-thread conn) dape-stack-trace-levels)))
   (if (dape--stopped-threads conn)
       (let* ((current-stack (dape--current-stack-frame conn))
              (stacks (plist-get (dape--current-thread conn) :stackFrames))
@@ -2633,6 +2637,11 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
   "List breakpoints."
   (interactive)
   (dape--repl-insert-info-buffer 'dape-info-breakpoints-mode))
+
+(defun dape-list-scope ()
+  "List variables in scope 0 for active debug session."
+  (interactive)
+  (dape--repl-insert-info-buffer 'dape-info-scope-mode 0))
 
 (defun dape-watch-dwim (expression &optional skip-add skip-remove)
   "Add or remove watch for EXPRESSION.
@@ -2740,9 +2749,10 @@ For more information see `dape-configs'."
   "Hook for `dape--compile-compilation-finish'.
 Using BUFFER and STR."
   (remove-hook 'compilation-finish-functions #'dape--compile-compilation-finish)
-  (cond ((equal "finished\n" str) (funcall dape--compile-after-fn))
-        (t (dape--message "Compilation failed %s" (string-trim-right str))))
-  (run-hook-with-args 'dape-compile-hook buffer))
+  (if (equal "finished\n" str)
+      (progn (funcall dape--compile-after-fn)
+             (run-hook-with-args 'dape-compile-hook buffer))
+    (dape--message "Compilation failed %s" (string-trim-right str))))
 
 (defun dape--compile (config fn)
   "Start compilation for CONFIG then call FN."
@@ -4513,13 +4523,15 @@ If REPL buffer is not live STRING will be displayed in minibuffer."
              (end (save-excursion
                     (next-single-property-change
                      (point) 'dape--revert-tag))))
-    (let ((line (line-number-at-pos (point) t)))
+    (let ((line (line-number-at-pos (point) t))
+          (col (current-column)))
       (delete-region start end)
       (insert (funcall fn))
       (dape--repl-move-marker (1+ (point)))
       (ignore-errors
         (goto-char (point-min))
-        (forward-line (1- line))))))
+        (forward-line (1- line))
+        (forward-char col)))))
 
 (defun dape--repl-variable (variable)
   "Return VARIABLE string representation with CONN."
@@ -4536,10 +4548,12 @@ If REPL buffer is not live STRING will be displayed in minibuffer."
                 'dape--revert-tag (cl-gensym "dape-region-tag")
                 'dape--revert-fn (apply-partially #'dape--repl-variable variable))))
 
-(defun dape--repl-info-string (mode)
-  "Return buffer content by MODE and `revert-buffer'."
+(defun dape--repl-info-string (mode index)
+  "Return info buffer content by MODE and `revert-buffer'.
+See `dape--info-scope-index' for information on INDEX."
   (with-temp-buffer
     (funcall mode)
+    (setq dape--info-scope-index index)
     (let ((dape-ui-debounce-time 0)
           (dape--request-blocking t))
       (revert-buffer))
@@ -4551,13 +4565,14 @@ If REPL buffer is not live STRING will be displayed in minibuffer."
              (add-text-properties
               0 (length str)
               `( dape--revert-tag ,(cl-gensym "dape-region-tag")
-                 dape--revert-fn ,(apply-partially #'dape--repl-info-string mode))
+                 dape--revert-fn ,(apply-partially #'dape--repl-info-string mode index))
               str)
              finally return str)))
 
-(defun dape--repl-insert-info-buffer (mode)
-  "Insert string into repl by MODE and `revert-buffer'."
-  (dape--repl-insert (concat (dape--repl-info-string mode) "\n"))
+(defun dape--repl-insert-info-buffer (mode &optional index)
+  "Insert content of MODE info buffer into repl.
+See `dape--repl-info-string' for information on INDEX."
+  (dape--repl-insert (concat (dape--repl-info-string mode index) "\n"))
   (when-let ((buffer (get-buffer "*dape-repl*")))
     (with-current-buffer buffer
       (dape--repl-move-marker (point-max)))))
