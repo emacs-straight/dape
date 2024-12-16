@@ -2559,7 +2559,6 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
           (thread-name
            (completing-read
             (format "Select thread (current %s): "
-                    ;; TODO Show current thread with connection prefix
                     (thread-first conn (dape--current-thread)
                                   (plist-get :name)))
             collection nil t)))
@@ -2759,7 +2758,7 @@ Using BUFFER and STR."
   (if (equal "finished\n" str)
       (progn (funcall dape--compile-after-fn)
              (run-hook-with-args 'dape-compile-hook buffer))
-    (dape--message "Compilation failed %s" (string-trim-right str))))
+    (dape--warn "Compilation failed \"%s\"" (string-trim-right str))))
 
 (defun dape--compile (config fn)
   "Start compilation for CONFIG then call FN."
@@ -4514,6 +4513,9 @@ If REPL buffer is not live STRING will be displayed in minibuffer."
     (comint-output-filter dummy-process dape--repl-prompt)))
 
 (defun dape--repl-move-marker (point)
+  "Mark the first line containing text property `dape--selected'.
+The search is done backwards from POINT.  The line is marked with
+`dape--repl-marker' and `gdb-mark-line'."
   (save-excursion
     (goto-char point)
     (when (text-property-search-backward 'dape--selected t)
