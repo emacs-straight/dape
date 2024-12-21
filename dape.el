@@ -119,7 +119,7 @@
               (thread-first config
                             (plist-put :pathBashdbLib ,bashdb-dir)
                             (plist-put :pathBashdb (file-name-concat ,bashdb-dir "bashdb"))
-                            (plist-put :env `(:BASHDB_HOME ,,bashdb-dir . ,(plist-get config :env)))))
+                            (plist-put :env `(:BASHDB_HOME ,bashdb-dir . ,(plist-get config :env)))))
          :type "bashdb"
          :cwd dape-cwd
          :program dape-buffer-default
@@ -4518,7 +4518,7 @@ The search is done backwards from POINT.  The line is marked with
 `dape--repl-marker' and `gdb-mark-line'."
   (save-excursion
     (goto-char point)
-    (when (text-property-search-backward 'dape--selected t)
+    (when (text-property-search-backward 'dape--selected)
       (gdb-mark-line (line-number-at-pos) dape--repl-marker))))
 
 (defun dape--repl-revert-region (&rest _)
