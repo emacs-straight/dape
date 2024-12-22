@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.18.0
+;; Version: 0.19.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -349,9 +349,7 @@
      fn (lambda (config)
           (plist-put config 'command-args
                      (mapcar (lambda (arg)
-                               (if (eq arg :-c)
-                                   (plist-get config '-c)
-                                 arg))
+                               (if (eq arg :-c) (plist-get config '-c) arg))
                              (plist-get config 'command-args))))
      port :autoport
      command-cwd dape-command-cwd
@@ -529,51 +527,19 @@ Sometimes it is useful for files or directories to supply local values
 for this variable.
 
 Example value:
-\(codelldb-cc :program \"/home/user/project/a.out\")"
+\(launch :program \"a.out\")"
   :type 'sexp)
 ;;;###autoload(put 'dape-command 'safe-local-variable #'listp)
-
-(defcustom dape-mime-mode-alist '(("text/x-lldb.disassembly" . asm-mode)
-                                  ("text/javascript" . js-mode))
-  "Alist of MIME types vs corresponding major mode functions.
-Each element should look like (MIME-TYPE . MODE) where
-    MIME-TYPE is a string and MODE is the major mode function to
-    use for buffers of this MIME type."
-  :type '(alist :key-type string :value-type function))
 
 (defcustom dape-key-prefix "\C-x\C-a"
   "Prefix of all dape commands."
   :type 'key-sequence)
-
-(defcustom dape-display-source-buffer-action
-  `((display-buffer-use-some-window display-buffer-pop-up-window)
-    (some-window
-     . (lambda (&rest _)
-         (cl-loop for w in (window-list nil 'skip-minibuffer) unless
-                  (buffer-match-p '(or (derived-mode . dape-shell-mode)
-                                       (derived-mode . dape-repl-mode)
-                                       (derived-mode . dape-memory-mode)
-                                       (derived-mode . dape-info-parent-mode))
-                                  (window-buffer w))
-                  return w))))
-  "`display-buffer' action used when displaying source buffer."
-  :type 'sexp)
 
 (defcustom dape-buffer-window-arrangement 'left
   "Rules for display dape buffers."
   :type '(choice (const :tag "GUD gdb like" gud)
                  (const :tag "Left side" left)
                  (const :tag "Right side" right)))
-
-(defcustom dape-info-buffer-window-groups
-  '((dape-info-scope-mode dape-info-watch-mode)
-    (dape-info-stack-mode dape-info-modules-mode dape-info-sources-mode)
-    (dape-info-breakpoints-mode dape-info-threads-mode))
-  "Window display rules for `dape-info-parent-mode' derived modes.
-Each list of modes is displayed in the same window.  The first item of
-each group is displayed by `dape-info'.  All modes doesn't need to be
-present in an group."
-  :type '(repeat (repeat function)))
 
 (defcustom dape-variable-auto-expand-alist '((hover . 1) (repl . 1) (watch . 1))
   "Default expansion depth for displaying variables.
@@ -598,6 +564,20 @@ variable should be expanded by default."
   "The number of stack frames fetched."
   :type 'natnum)
 
+(defcustom dape-display-source-buffer-action
+  `((display-buffer-use-some-window display-buffer-pop-up-window)
+    (some-window
+     . (lambda (&rest _)
+         (cl-loop for w in (window-list nil 'skip-minibuffer) unless
+                  (buffer-match-p '(or (derived-mode . dape-shell-mode)
+                                       (derived-mode . dape-repl-mode)
+                                       (derived-mode . dape-memory-mode)
+                                       (derived-mode . dape-info-parent-mode))
+                                  (window-buffer w))
+                  return w))))
+  "`display-buffer' action used when displaying source buffer."
+  :type 'sexp)
+
 (defcustom dape-start-hook '(dape-repl dape-info)
   "Called when session starts."
   :type 'hook)
@@ -614,13 +594,35 @@ variable should be expanded by default."
   "Called in buffer when placing overlay arrow for stack frame."
   :type 'hook)
 
+(defcustom dape-mime-mode-alist '(("text/x-lldb.disassembly" . asm-mode)
+                                  ("text/javascript" . js-mode))
+  "Alist of MIME types vs corresponding major mode functions.
+Each element should look like (MIME-TYPE . MODE) where MIME-TYPE is
+a string and MODE is the major mode function to use for buffers of
+this MIME type."
+  :type '(alist :key-type string :value-type function))
+
 (defcustom dape-memory-page-size 1024
   "The bytes read with `dape-read-memory'."
   :type 'natnum)
 
+(defcustom dape-info-buffer-window-groups
+  '((dape-info-scope-mode dape-info-watch-mode)
+    (dape-info-stack-mode dape-info-modules-mode dape-info-sources-mode)
+    (dape-info-breakpoints-mode dape-info-threads-mode))
+  "Window display rules for `dape-info-parent-mode' derived modes.
+Each list of modes is displayed in the same window.  The first item of
+each group is displayed by `dape-info'.  All modes doesn't need to be
+present in an group."
+  :type '(repeat (repeat function)))
+
 (defcustom dape-info-hide-mode-line
   (and (memql dape-buffer-window-arrangement '(left right)) t)
   "Hide mode line in dape info buffers."
+  :type 'boolean)
+
+(defcustom dape-info-table-indexed nil
+  "Show index of rows in tabulated info."
   :type 'boolean)
 
 (defcustom dape-info-variable-table-aligned nil
@@ -660,18 +662,9 @@ left-to-right display order of the properties."
   "Show frame addresses in stack buffer."
   :type 'boolean)
 
-(defcustom dape-info-buffer-variable-format 'line
-  "How variables are formatted in *dape-info* buffer."
-  :type '(choice (const :tag "Truncate string at new line" line)
-                 (const :tag "No formatting" nil)))
-
 (defcustom dape-info-file-name-max 25
   "Max length of file name in dape info buffers."
   :type 'integer)
-
-(defcustom dape-breakpoint-margin-string "B"
-  "String to display breakpoint in margin."
-  :type 'string)
 
 (defcustom dape-repl-use-shorthand t
   "Dape `dape-repl-commands' can be invoked with first char of command."
@@ -686,31 +679,34 @@ left-to-right display order of the properties."
     ("out" . dape-step-out)
     ("up" . dape-stack-select-up)
     ("down" . dape-stack-select-down)
-    ("threads" . dape-list-threads)
-    ("stack" . dape-list-stack)
-    ("modules" . dape-list-modules)
-    ("sources" . dape-list-sources)
-    ("breakpoints" . dape-list-breakpoints)
-    ("scope" . dape-list-scope)
-    ("watch" . dape-list-watch)
+    ("threads" . dape-repl-threads)
+    ("stack" . dape-repl-stack)
+    ("modules" . dape-repl-modules)
+    ("sources" . dape-repl-sources)
+    ("breakpoints" . dape-repl-breakpoints)
+    ("scope" . dape-repl-scope)
+    ("watch" . dape-repl-watch)
     ("restart" . dape-restart)
     ("kill" . dape-kill)
     ("disconnect" . dape-disconnect-quit)
     ("quit" . dape-quit))
-  "Dape commands available in REPL buffer."
-  :type '(alist :key-type string
-                :value-type function))
+  "Dape commands available in *dape-repl* buffer."
+  :type '(alist :key-type string :value-type function))
 
-(defcustom dape-compile-fn #'compile
-  "Function to compile with.
-The function is called with a command string."
-  :type 'function)
+(defcustom dape-breakpoint-margin-string "B"
+  "String to display breakpoint in margin."
+  :type 'string)
 
 (defcustom dape-default-breakpoints-file
   (locate-user-emacs-file "dape-breakpoints")
   "Default file for loading and saving breakpoints.
 See `dape-breakpoint-load' and `dape-breakpoint-save'."
   :type 'file)
+
+(defcustom dape-compile-fn #'compile
+  "Function to compile with.
+The function is called with a command string."
+  :type 'function)
 
 (defcustom dape-cwd-fn #'dape--default-cwd
   "Function to get current working directory.
@@ -2599,13 +2595,9 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
     (dape--with-request
         (dape--stack-trace conn (dape--current-thread conn) dape-stack-trace-levels)))
   (if (dape--stopped-threads conn)
-      (let* ((current-stack (dape--current-stack-frame conn))
-             (stacks (plist-get (dape--current-thread conn) :stackFrames))
-             (i (cl-loop for i upfrom 0 for stack in stacks
-                         when (equal stack current-stack) return (+ i n))))
-        (if (not (and (<= 0 i) (< i (length stacks))))
-            (message "Index %s out of range" i)
-          (dape-select-stack conn (plist-get (nth i stacks) :id))))
+      (let* ((frames (plist-get (dape--current-thread conn) :stackFrames))
+             (current-n (cl-position (dape--current-stack-frame conn) frames)))
+        (dape-select-stack conn (plist-get (nth (+ current-n n) frames) :id)))
     (message "No stopped threads")))
 
 (defun dape-stack-select-down (conn n)
@@ -2613,72 +2605,27 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
   (interactive (list (dape--live-connection 'stopped) 1))
   (dape-stack-select-up conn (* n -1)))
 
-(defun dape-list-threads ()
-  "List threads for active debug session."
-  (interactive)
-  (dape--repl-insert-info-buffer 'dape-info-threads-mode))
-
-(defun dape-list-stack ()
-  "List stack for active debug session."
-  (interactive)
-  (dape--repl-insert-info-buffer 'dape-info-stack-mode))
-
-(defun dape-list-modules ()
-  "List modules for active debug session."
-  (interactive)
-  (dape--repl-insert-info-buffer 'dape-info-modules-mode))
-
-(defun dape-list-sources ()
-  "List sources for active debug session."
-  (interactive)
-  (dape--repl-insert-info-buffer 'dape-info-sources-mode))
-
-(defun dape-list-breakpoints ()
-  "List breakpoints."
-  (interactive)
-  (dape--repl-insert-info-buffer 'dape-info-breakpoints-mode))
-
-(defun dape-list-scope ()
-  "List variables in scope 0 for active debug session."
-  (interactive)
-  (dape--repl-insert-info-buffer 'dape-info-scope-mode 0))
-
-(defun dape-list-watch ()
-  "List watched variables for active debug session."
-  (interactive)
-  (dape--repl-insert-info-buffer 'dape-info-watch-mode))
-
-(defun dape-watch-dwim (expression &optional skip-add skip-remove)
+(defun dape-watch-dwim (expression &optional no-add no-remove)
   "Add or remove watch for EXPRESSION.
-Watched symbols are displayed in *`dape-info' Watch* buffer.
-*`dape-info' Watch* buffer is displayed by executing the `dape-info'
-command.
-Optional argument SKIP-ADD limits usage to only removal of watched vars.
-Optional argument SKIP-REMOVE limits usage to only adding watched vars."
+NO-ADD limits usage to only removal of watched vars.
+NO-REMOVE limits usage to only adding watched vars."
   (interactive
    (list (string-trim
-          (completing-read "Watch or unwatch symbol: "
-                           (mapcar (lambda (plist) (plist-get plist :name))
-                                   dape--watched)
-                           nil nil
-                           (or (and (region-active-p)
-                                    (buffer-substring (region-beginning)
-                                                      (region-end)))
-                               (thing-at-point 'symbol))))))
-  (if-let ((plist
-            (cl-find-if (lambda (plist)
-                          (equal (plist-get plist :name)
-                                 expression))
-                        dape--watched)))
-      (unless skip-remove
-        (setq dape--watched
-              (cl-remove plist dape--watched)))
-    (unless skip-add
-      (push (list :name expression)
-            dape--watched)
-      (when (called-interactively-p 'interactive)
-        ;; FIXME Remove dependency on ui in core commands
-        (dape--display-buffer (dape--info-get-buffer-create 'dape-info-watch-mode)))))
+          (completing-read
+           "Watch or unwatch symbol: "
+           (mapcar (lambda (plist) (plist-get plist :name)) dape--watched)
+           nil nil
+           (or (and (region-active-p)
+                    (buffer-substring (region-beginning) (region-end)))
+               (thing-at-point 'symbol))))))
+  (if-let ((watched
+            (cl-find expression dape--watched
+                     :key (lambda (plist) (plist-get plist :name))
+                     :test #'equal)))
+      (unless no-remove
+        (setq dape--watched (cl-delete watched dape--watched)))
+    (unless no-add
+      (push (list :name expression) dape--watched)))
   (run-hooks 'dape-update-ui-hook))
 
 (defun dape-evaluate-expression (conn expression)
@@ -3620,14 +3567,12 @@ displayed."
 
 (defun dape--info-buffer-name (mode &optional identifier)
   "Create buffer name from MODE and IDENTIFIER."
-  (cond
-   ((eq 'dape-info-scope-mode mode)
-    (concat "*dape-info Scope*"
-            (unless (zerop identifier)
-              (format "<%s>" identifier))))
-   ((format "*dape-info %s*"
-            (or (alist-get mode dape--info-buffer-name-alist)
-                (error "Unable to create mode from %s with %s" mode identifier))))))
+  (cond ((eq 'dape-info-scope-mode mode)
+         (concat "*dape-info Scope*"
+                 (unless (zerop identifier)
+                   (format "<%s>" identifier))))
+        ((format "*dape-info %s*"
+                 (alist-get mode dape--info-buffer-name-alist)))))
 
 (defun dape--info-set-related-buffers ()
   "Store related buffers in `dape--info-buffer-related'."
@@ -3890,20 +3835,19 @@ See `dape-request' for expected CB signature."
          with conns = (dape--live-connections)
          with current-thread = (dape--current-thread conn)
          with conn-prefix-p = (length> (cl-remove-if-not 'dape--threads conns) 1)
-         with line-count = 0
+         with line = 0
          with selected-line
          for conn in conns
          for index upfrom 1 do
          (cl-loop
           for thread in (dape--threads conn) do
-          (setq line-count (1+ line-count))
-          (when (eq current-thread thread)
-            (setq selected-line line-count))
+          (cl-incf line)
+          (when (eq current-thread thread) (setq selected-line line))
           (gdb-table-add-row
            table
            (append
-            (when conn-prefix-p
-              (list (format "%s:" index)))
+            (when dape-info-table-indexed (list (format "%s" line)))
+            (when conn-prefix-p (list (format "%s:" index)))
             (list
              (concat
               (plist-get thread :name)
@@ -3981,27 +3925,27 @@ current buffer with CONN config."
              (setq selected-line line))
            (gdb-table-add-row
             table
-            (list
-             "in"
-             (concat
-              (plist-get frame :name)
-              (when-let* ((dape-info-stack-buffer-locations)
-                          (path (thread-first frame
-                                              (plist-get :source)
-                                              (plist-get :path)))
-                          (path (dape--path-local conn path)))
-                (concat " of "
-                        (dape--format-file-line path (plist-get frame :line))))
-              (when-let ((dape-info-stack-buffer-addresses)
-                         (ref (plist-get frame :instructionPointerReference)))
-                (concat " at " ref))
-              " "))
-            (list
-             'dape--info-frame frame
-             'dape--selected (eq current-stack-frame frame)
-             'mouse-face 'highlight
-             'keymap dape-info-stack-line-map
-             'help-echo "mouse-2, RET: Select frame"))
+            (append
+             (when dape-info-table-indexed (list (format "%s" line)))
+             (list "in"
+                   (concat
+                    (plist-get frame :name)
+                    (when-let* ((dape-info-stack-buffer-locations)
+                                (path (thread-first frame
+                                                    (plist-get :source)
+                                                    (plist-get :path)))
+                                (path (dape--path-local conn path)))
+                      (concat " of "
+                              (dape--format-file-line path (plist-get frame :line))))
+                    (when-let ((dape-info-stack-buffer-addresses)
+                               (ref (plist-get frame :instructionPointerReference)))
+                      (concat " at " ref))
+                    " ")))
+            (list 'dape--info-frame frame
+                  'dape--selected (eq current-stack-frame frame)
+                  'mouse-face 'highlight
+                  'keymap dape-info-stack-line-map
+                  'help-echo "mouse-2, RET: Select frame"))
            finally do
            (insert (gdb-table-string table " "))
            (when selected-line
@@ -4235,9 +4179,7 @@ current buffer with CONN config."
              (prop-org (alist-get key alist))
              (prop prop-org))
         (when prop-org
-          (when (eq dape-info-buffer-variable-format 'line)
-            (setq prop
-                  (substring prop 0 (string-match-p "\n" prop))))
+          (setq prop (substring prop 0 (string-match-p "\n" prop)))
           (if (and (> max 0) (length> prop max))
               (push (propertize (string-truncate-left prop max) 'help-echo prop-org)
                     columns)
@@ -4562,6 +4504,7 @@ See `dape--info-scope-index' for information on INDEX."
     (funcall mode)
     (setq dape--info-scope-index index)
     (let ((dape-ui-debounce-time 0)
+          (dape-info-table-indexed t)
           (dape--request-blocking t))
       (revert-buffer))
     (font-lock-ensure)
@@ -4597,34 +4540,37 @@ See `dape--repl-info-string' for information on INDEX."
 (defun dape--repl-input-sender (dummy-process input)
   "Send INPUT to DUMMY-PROCESS.
 Called by `comint-input-sender' in `dape-repl-mode'."
-  (let (cmd)
-    (cond
-     ;; Run previous input
-     ((and (string-empty-p input)
-           (not (string-empty-p (car (ring-elements comint-input-ring)))))
-      (when-let ((last (car (ring-elements comint-input-ring))))
-        (message "Using last command %s" last)
-        (dape--repl-input-sender dummy-process last)))
-     ;; Run command from `dape-named-commands'
-     ((setq cmd
-            (or (alist-get input dape-repl-commands nil nil 'equal)
-                (and dape-repl-use-shorthand
-                     (cdr (assoc input (dape--repl-shorthand-alist))))))
-      (dape--repl-insert-prompt)
-      ;; HACK: Special handing of `dape-quit', `comint-send-input'
-      ;;       expects buffer to be still live after calling
-      ;;       `comint-input-sender'.  Kill buffer with timer instead
-      ;;       to avoid error signal.
-      (if (eq 'dape-quit cmd)
-          (run-with-timer 0 nil 'call-interactively #'dape-quit)
-	(call-interactively cmd)))
-     ;; Evaluate expression
-     (t
-      (dape--repl-insert-prompt)
-      (dape-evaluate-expression
-       (or (dape--live-connection 'stopped t)
-           (dape--live-connection 'last))
-       (string-trim (substring-no-properties input)))))))
+  (cond
+   ;; Run previous input
+   ((and (string-empty-p input)
+         (not (string-empty-p (car (ring-elements comint-input-ring)))))
+    (when-let ((last (car (ring-elements comint-input-ring))))
+      (message "Using last command %s" last)
+      (dape--repl-input-sender dummy-process last)))
+   ;; Run command from `dape-named-commands'
+   ((pcase-let* ((`(,cmd . ,args)
+                  (string-split input split-string-default-separators))
+                 (fn (or (alist-get cmd dape-repl-commands nil nil 'equal)
+                         (and dape-repl-use-shorthand
+                              (cdr (assoc cmd (dape--repl-shorthand-alist)))))))
+      (when fn
+        (dape--repl-insert-prompt)
+        ;; HACK: Special handing of `dape-quit', `comint-send-input'
+        ;;       expects buffer to be still live after calling
+        ;;       `comint-input-sender'.  Kill buffer with timer instead
+        ;;       to avoid error signal.
+        (cond ((eq 'dape-quit fn)
+               (run-with-timer 0 nil #'call-interactively #'dape-quit))
+              ((commandp fn) (call-interactively fn))
+              ((funcall fn (string-join args " "))))
+        t)))
+   ;; Evaluate expression
+   (t
+    (dape--repl-insert-prompt)
+    (dape-evaluate-expression
+     (or (dape--live-connection 'stopped t)
+         (dape--live-connection 'last))
+     (string-trim (substring-no-properties input))))))
 
 (defun dape--repl-completion-at-point ()
   "Completion at point function for *dape-repl* buffer."
@@ -4707,6 +4653,49 @@ Called by `comint-input-sender' in `dape-repl-mode'."
        (goto-char (car bounds))
        (looking-back (regexp-opt trigger-chars) line-start)))))
 
+(defun dape-repl-threads (input)
+  "List threads in *dape-repl* buffer.
+If INPUT string is a number select thread N+1th thread."
+  (when-let* ((index (unless (string-blank-p input) (string-to-number input))))
+    (cl-loop with n = 0 for conn in (dape--live-connections)
+             for thread = (cl-loop for thread in (dape--threads conn)
+                                   when (equal (cl-incf n) index) return thread)
+             when thread return (dape-select-thread conn (plist-get thread :id))))
+  (dape--repl-insert-info-buffer 'dape-info-threads-mode))
+
+(defun dape-repl-stack (input)
+  "List modules in *dape-repl* buffer.
+If INPUT string is a number select stack N+1th thread."
+  (when-let* ((index (unless (string-blank-p input) (string-to-number input)))
+              (conn (dape--live-connection 'stopped t))
+              (frames (plist-get (dape--current-thread conn) :stackFrames)))
+    (dape-select-stack conn (plist-get (nth (1- index) frames) :id)))
+  (dape--repl-insert-info-buffer 'dape-info-stack-mode))
+
+(defun dape-repl-modules (_)
+  "List modules in *dape-repl* buffer."
+  (dape--repl-insert-info-buffer 'dape-info-modules-mode))
+
+(defun dape-repl-sources (_)
+  "List sources in *dape-repl* buffer."
+  (dape--repl-insert-info-buffer 'dape-info-sources-mode))
+
+(defun dape-repl-breakpoints (_)
+  "List breakpoints in *dape-repl* buffer."
+  (dape--repl-insert-info-buffer 'dape-info-breakpoints-mode))
+
+(defun dape-repl-scope (input)
+  "List variables of scope in *dape-repl* buffer.
+If INPUT string is a number list Nth scope."
+  (dape--repl-insert-info-buffer 'dape-info-scope-mode (string-to-number input)))
+
+(defun dape-repl-watch (input)
+  "List watched variables in *dape-repl* buffer.
+If INPUT is non blank add or remove expression to watch list."
+  (unless (string-blank-p input)
+    (dape-watch-dwim input))
+  (dape--repl-insert-info-buffer 'dape-info-watch-mode))
+
 (define-derived-mode dape-repl-mode comint-mode "REPL"
   "Mode for *dape-repl* buffer."
   :group 'dape
@@ -4732,24 +4721,24 @@ Called by `comint-input-sender' in `dape-repl-mode'."
                                     nil)
     (set-process-filter (get-buffer-process (current-buffer))
                         'comint-output-filter)
-    (insert (format
-             "* Welcome to Dape REPL! *
+    (insert
+     (format
+      "* Welcome to Dape REPL! *
 Available Dape commands: %s
 Empty input will rerun last command.\n\n"
-             (mapconcat
-              (pcase-lambda (`(,str . ,command))
-                (setq str (concat str))
-                (when dape-repl-use-shorthand
-                  (set-text-properties
-                   0 (thread-last (dape--repl-shorthand-alist)
-                                  (rassoc command)
-                                  (car)
-                                  (length))
-                   '(font-lock-face help-key-binding)
-                   str))
-                str)
-              dape-repl-commands
-              ", ")))
+      (mapconcat (pcase-lambda (`(,str . ,command))
+                   (setq str (concat str))
+                   (when dape-repl-use-shorthand
+                     (set-text-properties
+                      0 (thread-last (dape--repl-shorthand-alist)
+                                     (rassoc command)
+                                     (car)
+                                     (length))
+                      '(font-lock-face help-key-binding)
+                      str))
+                   str)
+                 dape-repl-commands
+                 ", ")))
     (set-marker (process-mark (get-buffer-process (current-buffer))) (point))
     (comint-output-filter (get-buffer-process (current-buffer))
                           dape--repl-prompt)))
@@ -4757,8 +4746,7 @@ Empty input will rerun last command.\n\n"
 (defun dape-repl ()
   "Create or select *dape-repl* buffer."
   (interactive)
-  (let ((buffer-name "*dape-repl*")
-        window)
+  (let ((buffer-name "*dape-repl*") window)
     (with-current-buffer (get-buffer-create buffer-name)
       (unless (eq major-mode 'dape-repl-mode)
         (dape-repl-mode))
@@ -4771,10 +4759,9 @@ Empty input will rerun last command.\n\n"
 
 (defcustom dape-inlay-hints nil
   "Inlay variable hints."
-  :type '(choice
-          (const :tag "No inlay hints." nil)
-          (const :tag "Inlay current line and previous line (same as 2)." t)
-          (natnum :tag "Number of lines with hints.")))
+  :type '(choice (const :tag "No inlay hints." nil)
+                 (const :tag "Inlay current line and previous line (same as 2)." t)
+                 (natnum :tag "Number of lines with hints.")))
 
 (defcustom dape-inlay-hints-variable-name-max 25
   "Max length of variable name in inlay hints."
