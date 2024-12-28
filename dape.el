@@ -539,7 +539,8 @@ Example value:
   "Rules for display dape buffers."
   :type '(choice (const :tag "GUD gdb like" gud)
                  (const :tag "Left side" left)
-                 (const :tag "Right side" right)))
+                 (const :tag "Right side" right)
+                 (const :tag "Use `display-buffer-base-action'" nil)))
 
 (defcustom dape-variable-auto-expand-alist '((hover . 1) (repl . 1) (watch . 1))
   "Default expansion depth for displaying variables.
@@ -666,6 +667,10 @@ left-to-right display order of the properties."
   "Max length of file name in dape info buffers."
   :type 'integer)
 
+(defcustom dape-repl-echo-shell-output nil
+  "Echo dape shell output in repl."
+  :type 'boolean)
+
 (defcustom dape-repl-use-shorthand t
   "Dape `dape-repl-commands' can be invoked with first char of command."
   :type 'boolean)
@@ -689,7 +694,8 @@ left-to-right display order of the properties."
     ("restart" . dape-restart)
     ("kill" . dape-kill)
     ("disconnect" . dape-disconnect-quit)
-    ("quit" . dape-quit))
+    ("quit" . dape-quit)
+    ("cd" . cd))
   "Dape commands available in *dape-repl* buffer."
   :type '(alist :key-type string :value-type function))
 
@@ -1220,7 +1226,8 @@ On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
                       '((display-buffer-in-side-window) (side . bottom) (slot . -1)))
                      (`(,_ . 2)
                       '((display-buffer-in-side-window) (side . bottom) (slot . 0)))
-                     (_ (error "Unable to display buffer of mode `%s'" mode)))))))
+                     (_ (error "Unable to display buffer of mode `%s'" mode))))
+                  (_ nil))))
     (display-buffer buffer `((display-buffer-reuse-window . ,fns) . ,alist))))
 
 (defmacro dape--mouse-command (name doc command)
@@ -1478,12 +1485,10 @@ timeout period is configurable with `dape-request-timeout'"
           (when cb (success-fn result)))
       (jsonrpc-async-request conn command arguments
                              :success-fn
-                             (when cb
-                               #'success-fn)
+                             (when cb #'success-fn)
                              :error-fn #'ignore ;; will never be called
                              :timeout-fn
-                             (when cb
-                               #'timeout-fn)
+                             (when cb #'timeout-fn)
                              :timeout dape-request-timeout))))
 
 (defun dape--initialize (conn)
@@ -1941,10 +1946,14 @@ Starts a new adapter CONNs from ARGUMENTS."
                                (list shell-file-name shell-command-switch
                                      (mapconcat #'identity args " "))
                              args))
-                         :filter 'comint-output-filter
+                         :filter (if dape-repl-echo-shell-output
+                                     (lambda (process string)
+                                       (dape--repl-insert string)
+                                       (comint-output-filter process string))
+                                   #'comint-output-filter)
                          :sentinel 'shell-command-sentinel
                          :file-handler t)))
-      (dape--display-buffer buffer)
+      (unless dape-repl-echo-shell-output (dape--display-buffer buffer))
       (list :processId (process-id process)))))
 
 (cl-defmethod dape-handle-request (conn (_command (eql startDebugging)) arguments)
@@ -3602,8 +3611,7 @@ displayed."
                             for name = (plist-get scope :name)
                             collect
                             (list 'dape-info-scope-mode i name)))
-                  (t
-                   `((,mode nil ,(alist-get mode dape--info-buffer-name-alist))))))))
+                  (`((,mode nil ,(alist-get mode dape--info-buffer-name-alist))))))))
 
 
 ;;; Info breakpoints buffer
@@ -4431,17 +4439,16 @@ If REPL buffer is not live STRING will be displayed in minibuffer."
               (setq start (point-marker))
               (let ((inhibit-read-only t))
                 (insert string))
+              ;; XXX Inserting at pos of `comint-last-prompt' ...
               (when comint-last-prompt
-                ;; XXX We are writing at the comint marker which
-                ;;     forces us to move it by hand
                 (move-marker (car comint-last-prompt) (point)))
-              (goto-char (point-max))
-              ;; HACK Run hooks as if `comint-output-filter' was executed
+              ;; and process marker, this forces us to move them by hand.
               (when-let ((process (get-buffer-process buffer)))
-                (set-marker (process-mark process) (point-max)))
+                (set-marker (process-mark process) (+ (point) (length dape--repl-prompt))))
+              ;; HACK Run hooks as if `comint-output-filter' was executed
               (let ((comint-last-output-start start))
                 (run-hook-with-args 'comint-output-filter-functions string)))))
-      ;; Fallback to `message' if repl buffer closed
+      ;; Fallback to `message' if no repl buffer
       (message (string-trim string)))))
 
 (defun dape--repl-insert-error (string)
@@ -4746,11 +4753,10 @@ Empty input will rerun last command.\n\n"
 (defun dape-repl ()
   "Create or select *dape-repl* buffer."
   (interactive)
-  (let ((buffer-name "*dape-repl*") window)
-    (with-current-buffer (get-buffer-create buffer-name)
-      (unless (eq major-mode 'dape-repl-mode)
-        (dape-repl-mode))
-      (setq window (dape--display-buffer (current-buffer)))
+  (with-current-buffer (get-buffer-create "*dape-repl*")
+    (unless (eq major-mode 'dape-repl-mode)
+      (dape-repl-mode))
+    (let ((window (dape--display-buffer (current-buffer))))
       (when (called-interactively-p 'interactive)
         (select-window window)))))
 
