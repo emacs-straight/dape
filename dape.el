@@ -2635,6 +2635,8 @@ NO-REMOVE limits usage to only adding watched vars."
         (setq dape--watched (cl-delete watched dape--watched)))
     (unless no-add
       (push (list :name expression) dape--watched)))
+  (when (called-interactively-p 'interactive)
+    (dape--display-buffer (dape--info-get-buffer-create 'dape-info-watch-mode)))
   (run-hooks 'dape-update-ui-hook))
 
 (defun dape-evaluate-expression (conn expression)
@@ -2756,10 +2758,10 @@ Using BUFFER and STR."
        ((not data) (message "No bytes returned from adapter"))
        (t
         (setq dape--memory-address address
+              hexl-max-address (1- dape-memory-page-size)
               buffer-undo-list nil)
-        (let ((inhibit-read-only t)
+        (let ((address (dape--memory-address-number))
               (temp-buffer (generate-new-buffer " *temp*" t))
-              (address (dape--memory-address-number))
               (buffer-empty-p (zerop (buffer-size))))
           (with-current-buffer temp-buffer
             (insert (base64-decode-string data))
@@ -2769,29 +2771,24 @@ Using BUFFER and STR."
             (goto-char (point-min))
             (while (re-search-forward "^[0-9a-f]+" nil t)
               (let ((address
-                     (format "%08x" (+ address
-                                       (string-to-number (match-string 0) 16)))))
+                     (format "%08x" (+ address (string-to-number (match-string 0) 16)))))
                 (delete-region (match-beginning 0) (match-end 0))
                 ;; `hexl' does not support address over 8 hex chars
                 (insert (append (substring address (- (length address) 8)))))))
           (replace-buffer-contents temp-buffer)
-          (when buffer-empty-p
-            (goto-char (point-min)))
+          (when buffer-empty-p (hexl-goto-address 0))
           (kill-buffer temp-buffer))
         (set-buffer-modified-p nil)
         (when write-capable-p
-	  (add-hook 'write-contents-functions #'dape--memory-write))
-        (rename-buffer (format "*dape-memory @ %s*" address) t))))))
+          (add-hook 'write-contents-functions #'dape--memory-write)))))))
 
 (defun dape--memory-write ()
   "Write buffer contents to stopped connection."
   (let ((conn (dape--live-connection 'last))
         (buffer (current-buffer))
-        (start (point-min))
-        (end (point-max))
         (address dape--memory-address))
     (with-temp-buffer
-      (insert-buffer-substring buffer start end)
+      (insert-buffer-substring buffer)
       (dehexlify-buffer)
       (dape--with-request-bind
           (_body error)
@@ -2807,18 +2804,13 @@ Using BUFFER and STR."
   ;; Return `t' to signal buffer written
   t)
 
-(defun dape--memory-print-current-point-info (&rest _ignored)
-  "Print address at point."
-  (let ((addr (+ (hexl-current-address) (dape--memory-address-number))))
-    (format "Current memory address is %d/0x%08x" addr addr)))
-
 (define-derived-mode dape-memory-mode hexl-mode "Memory"
   "Mode for reading and writing memory."
   :interactive nil
-  ;; TODO Look for alternatives to hexl, which handles address offsets
-  (add-hook 'eldoc-documentation-functions
-            #'dape--memory-print-current-point-info nil t)
-  (setq revert-buffer-function #'dape--memory-revert))
+  (setq revert-buffer-function #'dape--memory-revert
+        mode-line-buffer-identification
+        (append mode-line-buffer-identification '(" " dape--memory-address))
+        eldoc-documentation-functions nil))
 
 (define-key dape-memory-mode-map "\C-x]" #'dape-memory-next-page)
 (define-key dape-memory-mode-map "\C-x[" #'dape-memory-previous-page)
@@ -2827,13 +2819,10 @@ Using BUFFER and STR."
   "Move address `dape-memory-page-size' forward.
 When BACKWARD is non nil move backward instead."
   (interactive nil dape-memory-mode)
-  (let ((op (if backward '- '+)))
-    (dape-read-memory
-     (format "0x%08x"
-             (funcall op
-                      (dape--memory-address-number)
-                      dape-memory-page-size))
-     t)))
+  (dape-read-memory (format "0x%08x"
+                            (funcall (if backward '- '+) (dape--memory-address-number)
+                                     dape-memory-page-size))
+                    t))
 
 (defun dape-memory-previous-page ()
   "Move address `dape-memory-page-size' backward."
@@ -2844,8 +2833,7 @@ When BACKWARD is non nil move backward instead."
   "Revert all `dape-memory-mode' buffers."
   (dape--with-debounce dape--memory-debounce-timer dape-ui-debounce-time
     (cl-loop for buffer in (buffer-list)
-             when (eq (with-current-buffer buffer major-mode)
-                      'dape-memory-mode)
+             when (eq (with-current-buffer buffer major-mode) 'dape-memory-mode)
              do (with-current-buffer buffer (revert-buffer)))))
 
 (defun dape-read-memory (address &optional reuse-buffer)
@@ -2854,15 +2842,14 @@ If REUSE-BUFFER is non nil reuse the current buffer to display result
 of memory read."
   (interactive
    (list (string-trim
-          (read-string "Address: "
+          (read-string "Address: " nil nil
                        (when-let ((number (thing-at-point 'number)))
                          (format "0x%08x" number))))))
   (let ((conn (dape--live-connection 'stopped)))
     (unless (dape--capable-p conn :supportsReadMemoryRequest)
       (user-error "Adapter not capable of reading memory"))
-    (let ((buffer
-           (or (and reuse-buffer (current-buffer))
-               (generate-new-buffer (format "*dape-memory @ %s*" address)))))
+    (let ((buffer (if reuse-buffer (current-buffer)
+                    (generate-new-buffer "*dape-memory*"))))
       (with-current-buffer buffer
         (unless (eq major-mode 'dape-memory-mode)
           (dape-memory-mode)
@@ -2871,8 +2858,7 @@ of memory read."
                       "Write memory with `\\[save-buffer]'"))))
         (setq dape--memory-address address)
         (revert-buffer))
-      (select-window
-       (display-buffer buffer)))))
+      (select-window (display-buffer buffer)))))
 
 ;;; Breakpoints
 
@@ -4186,10 +4172,11 @@ current buffer with CONN config."
             (push prop columns)))))
     (nreverse columns)))
 
-(defun dape--info-scope-add-variable (table object ref path expanded-p)
+(defun dape--info-scope-add-variable (table object ref path test-expanded
+                                            &optional no-handles)
   "Add variable OBJECT with REF and PATH to TABLE.
-EXPANDED-P is called with PATH and OBJECT to determine if recursive
-calls should stop."
+TEST-EXPANDED is called with PATH and OBJECT to determine if recursive
+calls should continue.  If NO-HANDLES is non nil skip + - handles."
   (let* ((name (or (plist-get object :name) ""))
          (type (or (plist-get object :type) ""))
          (value (or (plist-get object :value)
@@ -4197,7 +4184,7 @@ calls should stop."
                     " "))
          (prefix (make-string (* (1- (length path)) 2) ?\s))
          (path (cons name path))
-         (expanded (funcall expanded-p path))
+         (expanded-p (funcall test-expanded path))
          row)
     (setq name
           (propertize name
@@ -4217,9 +4204,10 @@ calls should stop."
                       'keymap dape-info-variable-value-map)
           prefix
           (cond
+           (no-handles prefix)
            ((zerop (or (plist-get object :variablesReference) 0))
             (concat prefix "  "))
-           ((and expanded (plist-get object :variables))
+           ((and expanded-p (plist-get object :variables))
             (concat
              (propertize (concat prefix "-")
                          'mouse-face 'highlight
@@ -4246,12 +4234,12 @@ calls should stop."
                              'dape--info-path path
                              ;; `dape--command-at-line' expects non nil
                              'dape--info-ref (or ref 'refless)))
-    (when expanded
+    (when expanded-p
       ;; TODO Should be paged
       (dolist (variable (plist-get object :variables))
         (dape--info-scope-add-variable table variable
                                        (plist-get object :variablesReference)
-                                       path expanded-p)))))
+                                       path test-expanded no-handles)))))
 
 ;; FIXME Empty header line when adapter is killed
 (define-derived-mode dape-info-scope-mode dape-info-parent-mode "Scope"
@@ -4290,12 +4278,11 @@ calls should stop."
              (setf (gdb-table-right-align table)
                    dape-info-variable-table-aligned)
              do
-             (dape--info-scope-add-variable
-              table
-              object
-              (plist-get scope :variablesReference)
-              (list dape--info-scope-index)
-              #'dape--variable-expanded-p)
+             (dape--info-scope-add-variable table
+                                            object
+                                            (plist-get scope :variablesReference)
+                                            (list dape--info-scope-index)
+                                            #'dape--variable-expanded-p)
              finally (insert (gdb-table-string table " ")))))))))
 
 
@@ -5358,8 +5345,8 @@ See `eldoc-documentation-functions', for more information."
                                        #'dape--variable-expanded-p)
           (let ((table (make-gdb-table)))
             (dape--info-scope-add-variable table (plist-put body :name name)
-                                           nil '(hover)
-                                           #'dape--variable-expanded-p)
+                                           nil '(hover) #'dape--variable-expanded-p
+                                           'no-handles)
             (funcall cb (gdb-table-string table " ")))))))
   t)
 
