@@ -1,12 +1,12 @@
 ;;; dape.el --- Debug Adapter Protocol for Emacs -*- lexical-binding: t -*-
 
-;; Copyright (C) 2023-2024 Free Software Foundation, Inc.
+;; Copyright (C) 2023-2025 Free Software Foundation, Inc.
 
 ;; Author: Daniel Pettersson
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.19.0
+;; Version: 0.20.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -622,10 +622,6 @@ present in an group."
   "Hide mode line in dape info buffers."
   :type 'boolean)
 
-(defcustom dape-info-table-indexed nil
-  "Show index of rows in tabulated info."
-  :type 'boolean)
-
 (defcustom dape-info-variable-table-aligned nil
   "Align columns in variable tables."
   :type 'boolean)
@@ -741,9 +737,8 @@ compilation is successful."
   "How to push configuration options onto `dape-history'.
 
 - input: Store input as is read from minibuffer.
-- evaled: Input is evaluated then checked against base
-  configuration in `dape-configs'.  Each options that differ from
-  base are stored.
+- evaled: Input is evaluated then checked against base configuration
+  in `dape-configs'.  Each options that differ from base are stored.
 - dash-form: Like evaled but stores options in dash form if possible.
   With dash form characters after - are interpret in sh like format
   with ENV PROGRAM ARGS.  This is useful for adapters which accepts
@@ -1249,7 +1244,6 @@ FN is executed on mouse-2 and \\r, BODY is executed with `map' bound."
   (declare (indent defun))
   `(defvar ,name
      (let ((map (make-sparse-keymap)))
-       (suppress-keymap map)
        (define-key map "\r" ',fn)
        (define-key map [mouse-2] ',fn)
        (define-key map [follow-link] 'mouse-face)
@@ -2552,15 +2546,12 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
    (let* ((conn (dape--live-connection 'last))
           (collection
            (cl-loop with conns = (dape--live-connections)
-                    with conn-prefix-p =
-                    (length> (cl-remove-if-not 'dape--threads conns) 1)
-                    for conn in conns for index upfrom 1 append
+                    with index = 0
+                    for conn in conns append
                     (cl-loop for thread in (dape--threads conn) collect
-                             `(,(concat (when conn-prefix-p
-                                          (format "%s: " index))
-                                        (plist-get thread :name))
-                               ,conn
-                               ,(plist-get thread :id)))))
+                             (list (format "%s %s" (cl-incf index) (plist-get thread :name))
+                                   conn
+                                   (plist-get thread :id)))))
           (thread-name
            (completing-read
             (format "Select thread (current %s): "
@@ -3820,7 +3811,6 @@ See `dape-request' for expected CB signature."
          with table = (make-gdb-table)
          with conns = (dape--live-connections)
          with current-thread = (dape--current-thread conn)
-         with conn-prefix-p = (length> (cl-remove-if-not 'dape--threads conns) 1)
          with line = 0
          with selected-line
          for conn in conns
@@ -3831,40 +3821,37 @@ See `dape-request' for expected CB signature."
           (when (eq current-thread thread) (setq selected-line line))
           (gdb-table-add-row
            table
-           (append
-            (when dape-info-table-indexed (list (format "%s" line)))
-            (when conn-prefix-p (list (format "%s:" index)))
-            (list
-             (concat
-              (plist-get thread :name)
-              " "
-              (if-let ((status (plist-get thread :status)))
-                  (format "%s" status)
-                "unknown")
-              ;; Include frame information for stopped threads
-              (if-let* (((equal (plist-get thread :status) 'stopped))
-                        (top-stack (car (plist-get thread :stackFrames))))
-                  (concat
-                   " in " (plist-get top-stack :name)
-                   (when-let* ((dape-info-thread-buffer-locations)
-                               (path (thread-first top-stack
-                                                   (plist-get :source)
-                                                   (plist-get :path)))
-                               (path (dape--path-local conn path))
-                               (line (plist-get top-stack :line)))
-                     (concat " of " (dape--format-file-line path line)))
-                   (when-let ((dape-info-thread-buffer-addresses)
-                              (addr
-                               (plist-get top-stack :instructionPointerReference)))
-                     (concat " at " addr))
-                   " ")))))
            (list
-            'dape--info-conn conn
-            'dape--info-thread thread
-            'dape--selected (eq current-thread thread)
-            'mouse-face 'highlight
-            'keymap dape-info-threads-line-map
-            'help-echo "mouse-2, RET: select thread")))
+            (format "%s" line)
+            (concat
+             (plist-get thread :name)
+             " "
+             (if-let ((status (plist-get thread :status)))
+                 (format "%s" status)
+               "unknown")
+             ;; Include frame information for stopped threads
+             (if-let* (((equal (plist-get thread :status) 'stopped))
+                       (top-stack (car (plist-get thread :stackFrames))))
+                 (concat
+                  " in " (plist-get top-stack :name)
+                  (when-let* ((dape-info-thread-buffer-locations)
+                              (path (thread-first top-stack
+                                                  (plist-get :source)
+                                                  (plist-get :path)))
+                              (path (dape--path-local conn path))
+                              (line (plist-get top-stack :line)))
+                    (concat " of " (dape--format-file-line path line)))
+                  (when-let ((dape-info-thread-buffer-addresses)
+                             (addr
+                              (plist-get top-stack :instructionPointerReference)))
+                    (concat " at " addr))
+                  " "))))
+           (list 'dape--info-conn conn
+                 'dape--info-thread thread
+                 'dape--selected (eq current-thread thread)
+                 'mouse-face 'highlight
+                 'keymap dape-info-threads-line-map
+                 'help-echo "mouse-2, RET: select thread")))
          finally do
          (dape--info-update-with
            (insert (gdb-table-string table " "))
@@ -3881,7 +3868,7 @@ See `dape-request' for expected CB signature."
   "`dape-info-stack-mode' marker for `overlay-arrow-variable-list'.")
 
 (defvar dape--info-stack-font-lock-keywords
-  '(("in \\([^ ]+\\)"  (1 font-lock-function-name-face)))
+  '(("^[ 0-9]+ \\([^ ]+\\)"  (1 font-lock-function-name-face)))
   "Font lock keywords used in `gdb-frames-mode'.")
 
 (dape--command-at-line dape-info-stack-select (dape--info-frame)
@@ -3911,22 +3898,21 @@ current buffer with CONN config."
              (setq selected-line line))
            (gdb-table-add-row
             table
-            (append
-             (when dape-info-table-indexed (list (format "%s" line)))
-             (list "in"
-                   (concat
-                    (plist-get frame :name)
-                    (when-let* ((dape-info-stack-buffer-locations)
-                                (path (thread-first frame
-                                                    (plist-get :source)
-                                                    (plist-get :path)))
-                                (path (dape--path-local conn path)))
-                      (concat " of "
-                              (dape--format-file-line path (plist-get frame :line))))
-                    (when-let ((dape-info-stack-buffer-addresses)
-                               (ref (plist-get frame :instructionPointerReference)))
-                      (concat " at " ref))
-                    " ")))
+            (list
+             (format "%s" line)
+             (concat
+              (plist-get frame :name)
+              (when-let* ((dape-info-stack-buffer-locations)
+                          (path (thread-first frame
+                                              (plist-get :source)
+                                              (plist-get :path)))
+                          (path (dape--path-local conn path)))
+                (concat " of "
+                        (dape--format-file-line path (plist-get frame :line))))
+              (when-let ((dape-info-stack-buffer-addresses)
+                         (ref (plist-get frame :instructionPointerReference)))
+                (concat " at " ref))
+              " "))
             (list 'dape--info-frame frame
                   'dape--selected (eq current-stack-frame frame)
                   'mouse-face 'highlight
@@ -4145,13 +4131,16 @@ current buffer with CONN config."
            (dape--info-get-buffer-create 'dape-info-breakpoints-mode))
           (run-hooks 'dape-update-ui-hook))))))
 
-(defvar dape-info-scope-mode-map
+(defvar dape-info-variable-map
   (let ((map (make-sparse-keymap)))
     (define-key map "e" 'dape-info-scope-toggle)
     (define-key map "W" 'dape-info-scope-watch-dwim)
     (define-key map "=" 'dape-info-variable-edit)
     (define-key map "b" 'dape-info-scope-data-breakpoint)
     map)
+  "Keymap for buffers or regions displaying variables.")
+
+(defvar dape-info-scope-mode-map (copy-keymap dape-info-variable-map)
   "Local keymap for dape scope buffers.")
 
 (defun dape--info-locals-table-columns-list (alist)
@@ -4245,8 +4234,7 @@ calls should continue.  If NO-HANDLES is non nil skip + - handles."
 (define-derived-mode dape-info-scope-mode dape-info-parent-mode "Scope"
   "Major mode for Dape info scope."
   :interactive nil
-  (dape--info-update-with
-    (insert "No scope information available.")))
+  (dape--info-update-with (insert "No scope information available.")))
 
 (cl-defmethod dape--info-revert (&context (major-mode (eql dape-info-scope-mode))
                                           &optional _ignore-auto _noconfirm _preserve-modes)
@@ -4468,6 +4456,19 @@ The search is done backwards from POINT.  The line is marked with
         (forward-line (1- line))
         (forward-char col)))))
 
+(defun dape--repl-make-region-string (str revert-function keymap)
+  "Return STR with local REVERT-FUNCTION and KEYMAP."
+  (cl-loop for (start end props) in (object-intervals str) do
+           (add-text-properties start end
+                                `( keymap ,(make-composed-keymap
+                                            (list (plist-get props 'keymap) keymap))
+                                   font-lock-face ,(plist-get props 'face))
+                                str)
+           finally return
+           (propertize str
+                       'dape--revert-tag (cl-gensym "dape-region-tag")
+                       'dape--revert-fn revert-function)))
+
 (defun dape--repl-variable (variable)
   "Return VARIABLE string representation with CONN."
   (when-let* ((conn (or (dape--live-connection 'stopped t)
@@ -4479,9 +4480,9 @@ The search is done backwards from POINT.  The line is marked with
   (let ((table (make-gdb-table)))
     (setf (gdb-table-right-align table) dape-info-variable-table-aligned)
     (dape--info-scope-add-variable table variable nil '(repl) #'dape--variable-expanded-p)
-    (propertize (gdb-table-string table " ")
-                'dape--revert-tag (cl-gensym "dape-region-tag")
-                'dape--revert-fn (apply-partially #'dape--repl-variable variable))))
+    (dape--repl-make-region-string (gdb-table-string table " ")
+                                   (apply-partially #'dape--repl-variable variable)
+                                   dape-info-variable-map)))
 
 (defun dape--repl-info-string (mode index)
   "Return info buffer content by MODE and `revert-buffer'.
@@ -4490,20 +4491,14 @@ See `dape--info-scope-index' for information on INDEX."
     (funcall mode)
     (setq dape--info-scope-index index)
     (let ((dape-ui-debounce-time 0)
-          (dape-info-table-indexed t)
           (dape--request-blocking t))
       (revert-buffer))
     (font-lock-ensure)
-    (cl-loop with str = (buffer-substring (point-min) (point-max))
-             for (start end props) in (object-intervals str) do
-             (put-text-property start end 'font-lock-face (plist-get props 'face) str)
-             finally do
-             (add-text-properties
-              0 (length str)
-              `( dape--revert-tag ,(cl-gensym "dape-region-tag")
-                 dape--revert-fn ,(apply-partially #'dape--repl-info-string mode index))
-              str)
-             finally return str)))
+    (dape--repl-make-region-string
+     (buffer-substring (point-min) (point-max))
+     (apply-partially #'dape--repl-info-string mode index)
+     (when (memq mode '(dape-info-watch-mode dape-info-scope-mode))
+       dape-info-variable-map))))
 
 (defun dape--repl-insert-info-buffer (mode &optional index)
   "Insert content of MODE info buffer into repl.
