@@ -59,22 +59,6 @@
 (require 'jsonrpc)
 
 
-;;; Obsolete aliases
-(define-obsolete-variable-alias 'dape-buffer-window-arrangment 'dape-buffer-window-arrangement "0.3.0")
-(define-obsolete-variable-alias 'dape-read-memory-default-count 'dape-memory-page-size "0.8.0")
-(define-obsolete-variable-alias 'dape-on-start-hooks 'dape-start-hook "0.13.0")
-(define-obsolete-variable-alias 'dape-on-stopped-hooks 'dape-stopped-hook "0.13.0")
-(define-obsolete-variable-alias 'dape-update-ui-hooks 'dape-update-ui-hook "0.13.0")
-(define-obsolete-variable-alias 'dape-compile-compile-hooks 'dape-compile-hook "0.13.0")
-
-
-;;; Forward declarations
-(defvar hl-line-mode)
-(defvar hl-line-sticky-flag)
-(declare-function global-hl-line-highlight  "hl-line" ())
-(declare-function hl-line-highlight         "hl-line" ())
-
-
 ;;; Custom
 (defgroup dape nil
   "Debug Adapter Protocol for Emacs."
@@ -460,7 +444,7 @@ Symbol keys (Used by dape):
 - port: Port of the debug adapter.
 - modes: List of modes where the configuration is active in `dape'
   completions.
-- compile: Executes a shell command with `dape-compile-fn'.
+- compile: Executes a shell command with `dape-compile-function'.
 - defer-launch-attach: If launch/attach request should be sent
   after initialize or configurationDone.  If nil launch/attach are
   sent after initialize request else it's sent after
@@ -535,6 +519,7 @@ Example value:
   "Prefix of all dape commands."
   :type 'key-sequence)
 
+(define-obsolete-variable-alias 'dape-buffer-window-arrangment 'dape-buffer-window-arrangement "0.3.0")
 (defcustom dape-buffer-window-arrangement 'left
   "Rules for display dape buffers."
   :type '(choice (const :tag "GUD gdb like" gud)
@@ -579,14 +564,17 @@ variable should be expanded by default."
   "`display-buffer' action used when displaying source buffer."
   :type 'sexp)
 
+(define-obsolete-variable-alias 'dape-on-start-hooks 'dape-start-hook "0.13.0")
 (defcustom dape-start-hook '(dape-repl dape-info)
   "Called when session starts."
   :type 'hook)
 
+(define-obsolete-variable-alias 'dape-on-stopped-hooks 'dape-stopped-hook "0.13.0")
 (defcustom dape-stopped-hook '(dape-memory-revert dape--emacs-grab-focus)
   "Called when session stopped."
   :type 'hook)
 
+(define-obsolete-variable-alias 'dape-update-ui-hooks 'dape-update-ui-hook "0.13.0")
 (defcustom dape-update-ui-hook '(dape-info-update)
   "Called when it's sensible to refresh UI."
   :type 'hook)
@@ -603,6 +591,7 @@ a string and MODE is the major mode function to use for buffers of
 this MIME type."
   :type '(alist :key-type string :value-type function))
 
+(define-obsolete-variable-alias 'dape-read-memory-default-count 'dape-memory-page-size "0.8.0")
 (defcustom dape-memory-page-size 1024
   "The bytes read with `dape-read-memory'."
   :type 'natnum)
@@ -705,18 +694,21 @@ left-to-right display order of the properties."
 See `dape-breakpoint-load' and `dape-breakpoint-save'."
   :type 'file)
 
-(defcustom dape-compile-fn #'compile
+(define-obsolete-variable-alias 'dape-compile-fn 'dape-compile-function "0.21.0")
+(defcustom dape-compile-function #'compile
   "Function to compile with.
 The function is called with a command string."
   :type 'function)
 
-(defcustom dape-cwd-fn #'dape--default-cwd
+(define-obsolete-variable-alias 'dape-cwd-fn 'dape-cwd-function "0.21.0")
+(defcustom dape-cwd-function #'dape--default-cwd
   "Function to get current working directory.
 The function should return a string representing the absolute
 file path of the current working directory, usually the current
 project's root.  See `dape--default-cwd'."
   :type 'function)
 
+(define-obsolete-variable-alias 'dape-compile-compile-hooks 'dape-compile-hook "0.13.0")
 (defcustom dape-compile-hook nil
   "Called after dape compilation finishes.
 The hook is run with one argument, the compilation buffer when
@@ -788,6 +780,13 @@ Debug logging has an noticeable effect on performance."
 (defface dape-repl-error-face '((t :inherit compilation-mode-line-fail
                                    :extend t))
   "Face used in repl for non 0 exit codes.")
+
+
+;;; Forward declarations
+(defvar hl-line-mode)
+(defvar hl-line-sticky-flag)
+(declare-function global-hl-line-highlight  "hl-line" ())
+(declare-function hl-line-highlight         "hl-line" ())
 
 
 ;;; Vars
@@ -1055,12 +1054,12 @@ Note requires `dape--source-ensure' if source is by reference."
       default-directory))
 
 (defun dape-cwd ()
-  "Use `dape-cwd-fn' to guess current working as local path."
-  (tramp-file-local-name (funcall dape-cwd-fn)))
+  "Use `dape-cwd-function' to guess current working as local path."
+  (tramp-file-local-name (funcall dape-cwd-function)))
 
 (defun dape-command-cwd ()
-  "Use `dape-cwd-fn' to guess current working directory."
-  (funcall dape-cwd-fn))
+  "Use `dape-cwd-function' to guess current working directory."
+  (funcall dape-cwd-function))
 
 (defun dape-buffer-default ()
   "Return current buffers file name."
@@ -2481,7 +2480,7 @@ CONN is inferred for interactive invocations."
 Expressions within `{}` are interpolated."
   (interactive
    (list
-    (read-string "Log (Expressions within `{}` are interpolated): "
+    (read-string "Log (Expressions within {} are interpolated): "
                  (when-let ((breakpoint
                              (cl-find 'log (dape--breakpoints-at-point)
                                       :key #'dape--breakpoint-type)))
@@ -2541,7 +2540,8 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
            (dape--breakpoint-broadcast-update source)))
 
 (defun dape-select-thread (conn thread-id)
-  "Select current thread for adapter CONN by THREAD-ID."
+  "Select current thread for adapter CONN by THREAD-ID.
+With prefix argument thread is selected by index."
   (interactive
    (let* ((conn (dape--live-connection 'last))
           (collection
@@ -2553,11 +2553,13 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
                                    conn
                                    (plist-get thread :id)))))
           (thread-name
-           (completing-read
-            (format "Select thread (current %s): "
-                    (thread-first conn (dape--current-thread)
-                                  (plist-get :name)))
-            collection nil t)))
+           (if (numberp current-prefix-arg)
+               (car (nth (1- current-prefix-arg) collection))
+             (completing-read
+              (format "Select thread (current %s): "
+                      (thread-first conn (dape--current-thread)
+                                    (plist-get :name)))
+              collection nil t))))
      (alist-get thread-name collection nil nil 'equal)))
   (setf (dape--thread-id conn) thread-id)
   (setq dape--connection-selected conn)
@@ -2565,7 +2567,8 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
   (dape--mode-line-format))
 
 (defun dape-select-stack (conn stack-id)
-  "Selected current stack for adapter CONN by STACK-ID."
+  "Selected current stack for adapter CONN by STACK-ID.
+With prefix argument stack is selected by index."
   (interactive
    (let* ((conn (dape--live-connection 'stopped))
           (current-thread (dape--current-thread conn))
@@ -2580,9 +2583,11 @@ When SKIP-UPDATE is non nil, does not notify adapter about removal."
                                            (plist-get stack :id)))
                      (plist-get current-thread :stackFrames))))
           (stack-name
-           (completing-read (format "Select stack (current %s): "
-                                    (plist-get (dape--current-stack-frame conn) :name))
-                            collection nil t)))
+           (if (numberp current-prefix-arg)
+               (car (nth (1- current-prefix-arg) collection))
+             (completing-read (format "Select stack (current %s): "
+                                      (plist-get (dape--current-stack-frame conn) :name))
+                              collection nil t))))
      (list conn (alist-get stack-name collection nil nil 'equal))))
   (setf (dape--stack-id conn) stack-id)
   (dape--update conn nil t))
@@ -2612,9 +2617,9 @@ NO-REMOVE limits usage to only adding watched vars."
   (interactive
    (list (string-trim
           (completing-read
-           "Watch or unwatch symbol: "
+           "Watch or unwatch symbol or expression: "
            (mapcar (lambda (plist) (plist-get plist :name)) dape--watched)
-           nil nil
+           nil nil nil nil
            (or (and (region-active-p)
                     (buffer-substring (region-beginning) (region-end)))
                (thing-at-point 'symbol))))))
@@ -2713,7 +2718,7 @@ Using BUFFER and STR."
   "Start compilation for CONFIG then call FN."
   (let ((default-directory (dape--guess-root config))
         (command (plist-get config 'compile)))
-    (funcall dape-compile-fn command)
+    (funcall dape-compile-function command)
     (with-current-buffer (compilation-find-buffer)
       (setq dape--compile-after-fn fn)
       (add-hook 'compilation-finish-functions #'dape--compile-compilation-finish nil t))))
@@ -3647,21 +3652,17 @@ without log or expression breakpoint"))))))
 
 (dape--buffer-map dape-info-exceptions-line-map dape-info-exceptions-toggle)
 
-(defvar dape--info-breakpoints-font-lock-keywords
-  '(("^ *\\(y\\)"  (1 font-lock-warning-face))
-    ("^ *\\(n\\)"  (1 font-lock-doc-face)))
-  "Keywords for `dape-info-breakpoints-mode'.")
-
 (define-derived-mode dape-info-breakpoints-mode dape-info-parent-mode "Breakpoints"
   "Major mode for Dape info breakpoints."
-  :interactive nil
-  (setq font-lock-defaults '(dape--info-breakpoints-font-lock-keywords)))
+  :interactive nil)
 
 (cl-defmethod dape--info-revert (&context (major-mode (eql dape-info-breakpoints-mode))
                                           &optional _ignore-auto _noconfirm _preserve-modes)
   "Revert buffer function for MAJOR-MODE `dape-info-breakpoints-mode'."
   (dape--info-update-with
-    (let ((table (make-gdb-table)))
+    (let ((table (make-gdb-table))
+          (y (propertize "y" 'font-lock-face 'font-lock-warning-face))
+          (n (propertize "n" 'font-lock-face 'font-lock-doc-face)))
       (cl-loop
        for breakpoint in dape--breakpoints
        for line = (dape--breakpoint-line breakpoint)
@@ -3680,7 +3681,7 @@ without log or expression breakpoint"))))))
         (list
          (if-let ((hits (dape--breakpoint-hits breakpoint)))
              (format "%s" hits)
-           (if verified-p "y" "n"))
+           (if verified-p y n))
          (pcase (dape--breakpoint-type breakpoint)
            ('log        "Log  ")
            ('hits       "Hits ")
@@ -3705,7 +3706,7 @@ without log or expression breakpoint"))))))
        for plist in dape--data-breakpoints do
        (gdb-table-add-row
         table
-        (list "y"
+        (list y
               "Data "
               (format "%s %s %s"
                       (propertize (plist-get plist :name)
@@ -3720,7 +3721,7 @@ without log or expression breakpoint"))))))
        for exception in dape--exceptions do
        (gdb-table-add-row
         table
-        (list (if (plist-get exception :enabled) "y" "n")
+        (list (if (plist-get exception :enabled) y n)
               "Excep"
               (format "%s" (plist-get exception :label)))
         (list 'dape--info-exception exception
@@ -4462,7 +4463,8 @@ The search is done backwards from POINT.  The line is marked with
            (add-text-properties start end
                                 `( keymap ,(make-composed-keymap
                                             (list (plist-get props 'keymap) keymap))
-                                   font-lock-face ,(plist-get props 'face))
+                                   font-lock-face ,(or (plist-get props 'font-lock-face)
+                                                       (plist-get props 'face)))
                                 str)
            finally return
            (propertize str

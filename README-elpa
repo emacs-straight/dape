@@ -89,7 +89,7 @@ source buffers and `repeat-mode' for more pleasant key mappings.
   │   ;; (add-hook 'dape-compile-hook 'kill-buffer)
   │ 
   │   ;; Projectile users
-  │   ;; (setq dape-cwd-fn 'projectile-project-root)
+  │   ;; (setq dape-cwd-function 'projectile-project-root)
   │   )
   │ 
   │ ;; Enable repeat mode for more ergonomic `dape' use
