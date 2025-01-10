@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.20.0
+;; Version: 0.21.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -103,7 +103,7 @@
               (thread-first config
                             (plist-put :pathBashdbLib ,bashdb-dir)
                             (plist-put :pathBashdb (file-name-concat ,bashdb-dir "bashdb"))
-                            (plist-put :env `(:BASHDB_HOME ,bashdb-dir . ,(plist-get config :env)))))
+                            (plist-put :env `(:BASHDB_HOME ,,bashdb-dir . ,(plist-get config :env)))))
          :type "bashdb"
          :cwd dape-cwd
          :program dape-buffer-default
