@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.21.0
+;; Version: 0.22.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -550,16 +550,7 @@ variable should be expanded by default."
   :type 'natnum)
 
 (defcustom dape-display-source-buffer-action
-  `((display-buffer-use-some-window display-buffer-pop-up-window)
-    (some-window
-     . (lambda (&rest _)
-         (cl-loop for w in (window-list nil 'skip-minibuffer) unless
-                  (buffer-match-p '(or (derived-mode . dape-shell-mode)
-                                       (derived-mode . dape-repl-mode)
-                                       (derived-mode . dape-memory-mode)
-                                       (derived-mode . dape-info-parent-mode))
-                                  (window-buffer w))
-                  return w))))
+  `((display-buffer-reuse-mode-window display-buffer-use-some-window))
   "`display-buffer' action used when displaying source buffer."
   :type 'sexp)
 
