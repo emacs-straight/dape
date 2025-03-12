@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.22.0
+;; Version: 0.23.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -2644,7 +2644,7 @@ CONN is inferred by either last stopped or last created connection."
     (or (dape--live-connection 'stopped t) (dape--live-connection 'last))
     (if (region-active-p)
         (buffer-substring (region-beginning) (region-end))
-      (read-string "Evaluate: " (thing-at-point 'symbol)))))
+      (read-string "Evaluate: " nil nil (thing-at-point 'symbol)))))
   (dape--with-request-bind
       ((&whole body &key variablesReference result &allow-other-keys) error)
       (dape--evaluate-expression conn (plist-get (dape--current-stack-frame conn) :id)
