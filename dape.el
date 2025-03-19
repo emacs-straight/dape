@@ -586,7 +586,7 @@ this MIME type."
 
 (define-obsolete-variable-alias 'dape-read-memory-default-count 'dape-memory-page-size "0.8.0")
 (defcustom dape-memory-page-size 1024
-  "The bytes read with `dape-read-memory'."
+  "The bytes read with `dape-memory'."
   :type 'natnum)
 
 (defcustom dape-info-buffer-window-groups
@@ -2817,10 +2817,11 @@ Using BUFFER and STR."
   "Move address `dape-memory-page-size' forward.
 When BACKWARD is non nil move backward instead."
   (interactive nil dape-memory-mode)
-  (dape-read-memory (format "0x%08x"
-                            (funcall (if backward '- '+) (dape--memory-address-number)
-                                     dape-memory-page-size))
-                    t))
+  (dape-memory (format "0x%08x"
+                       (funcall (if backward #'- #'+)
+                                (dape--memory-address-number)
+                                dape-memory-page-size))
+               t))
 
 (defun dape-memory-previous-page ()
   "Move address `dape-memory-page-size' backward."
@@ -2834,13 +2835,14 @@ When BACKWARD is non nil move backward instead."
              when (eq (buffer-local-value 'major-mode buffer) 'dape-memory-mode)
              do (with-current-buffer buffer (revert-buffer)))))
 
-(defun dape-read-memory (address &optional reuse-buffer)
-  "Read `dape-memory-page-size' bytes of memory at ADDRESS.
+(define-obsolete-variable-alias 'dape-read-memory 'dape-memory "0.24.0")
+(defun dape-memory (address &optional reuse-buffer)
+  "View and edit memory from ADDRESS in hex dump format.
 If REUSE-BUFFER is non nil reuse the current buffer to display result
 of memory read."
   (interactive
    (list (string-trim
-          (read-string "Read memory from address: " nil nil
+          (read-string "Address: " nil nil
                        (when-let* ((number (thing-at-point 'number)))
                          (format "0x%08x" number))))))
   (let ((conn (dape--live-connection 'stopped)))
@@ -2881,24 +2883,23 @@ of memory read."
                       'dape-disassemble-mode)
              do (with-current-buffer buffer (revert-buffer)))))
 
-(defun dape-disassemble (memory-reference count)
-  "Disassemble COUNT instructions around MEMORY-REFERENCE."
+(defun dape-disassemble (address)
+  "View disassemble of instructions at ADDRESS."
   (interactive
    (list (string-trim
-          (read-string "Disassemble at address: " nil nil
+          (read-string "Address: " nil nil
                        (when-let* ((number (thing-at-point 'number)))
-                         (format "0x%08x" number))))
-         100))
+                         (format "0x%08x" number))))))
   (if-let* ((conn (dape--live-connection 'stopped))
             ((not (dape--capable-p conn :supportsDisassembleRequest))))
       (user-error "Adapter does not support disassemble")
     (dape--with-request-bind
         ((&key ((:instructions instructions)) &allow-other-keys) _)
         (dape-request conn 'disassemble
-                      `( :memoryReference ,memory-reference
-                         :instructionCount ,count
+                      `( :memoryReference ,address
+                         :instructionCount 100
                          :offset 0
-                         :instructionOffset ,(- (/ count 2) count)
+                         :instructionOffset -50
                          :resolveSymbols t))
       (cl-flet ((address-to-int (address)
                   (string-to-number (substring address 2) 16)))
@@ -2943,8 +2944,7 @@ of memory read."
                (dape--indicator "|" 'vertical-bar nil))
              'dape--disassemble-instruction instruction)))
           (setq-local revert-buffer-function
-                      (lambda (&rest _)
-                        (dape-disassemble memory-reference count)))
+                      (lambda (&rest _) (dape-disassemble address)))
           (with-selected-window (display-buffer (current-buffer))
             (goto-char
              (or (marker-position dape--disassemble-overlay-arrow)
@@ -3944,7 +3944,21 @@ See `dape-request' for expected CB signature."
                      (plist-get dape--info-frame :id))
   (revert-buffer))
 
-(dape--buffer-map dape-info-stack-line-map dape-info-stack-select)
+(dape--command-at-line dape-info-stack-memory (dape--info-frame)
+  "View and edit memory at address of frame."
+  (if-let* ((ref (plist-get dape--info-frame :instructionPointerReference)))
+      (dape-memory ref)
+    (user-error "No address for frame")))
+
+(dape--command-at-line dape-info-stack-disassemble (dape--info-frame)
+  "View disassemble at address of frame."
+  (if-let* ((ref (plist-get dape--info-frame :instructionPointerReference)))
+      (dape-disassemble ref)
+    (user-error "No address for frame")))
+
+(dape--buffer-map dape-info-stack-line-map dape-info-stack-select
+  (define-key map "m" 'dape-info-stack-memory)
+  (define-key map "M" 'dape-info-stack-disassemble))
 
 (define-derived-mode dape-info-stack-mode dape-info-parent-mode "Stack"
   "Major mode for Dape info stack."
@@ -3957,10 +3971,8 @@ See `dape-request' for expected CB signature."
   "Helper for inserting stack info into stack buffer.
 Create table from CURRENT-STACK-FRAME and STACK-FRAMES and insert into
 current buffer with CONN config."
-  (cl-loop with table = (make-gdb-table)
-           with selected-line
-           for line from 1
-           for frame in stack-frames do
+  (cl-loop with table = (make-gdb-table) with selected-line
+           for line from 1 for frame in stack-frames do
            (when (eq current-stack-frame frame)
              (setq selected-line line))
            (gdb-table-add-row
@@ -4064,8 +4076,7 @@ current buffer with CONN config."
                   (when-let* ((path (plist-get module :path)))
                     (concat " of " (dape--format-file-line path nil)))
                   (when-let* ((address-range (plist-get module :addressRange)))
-                    (concat " at "
-                            address-range nil))
+                    (concat " at " address-range nil))
                   " "))
                 (list
                  'dape--info-module module
@@ -5420,7 +5431,7 @@ See `eldoc-documentation-functions', for more information."
     "--"
     ["REPL" dape-repl]
     ["Info buffers" dape-info]
-    ["Memory" dape-read-memory
+    ["Memory" dape-memory
      :enable (dape--capable-p (dape--live-connection 'last)
                               :supportsReadMemoryRequest)]
     ["Disassemble" dape-disassemble
@@ -5498,7 +5509,7 @@ mouse-1: Display minor mode menu"
     (define-key map "r" #'dape-restart)
     (define-key map "i" #'dape-info)
     (define-key map "R" #'dape-repl)
-    (define-key map "m" #'dape-read-memory)
+    (define-key map "m" #'dape-memory)
     (define-key map "M" #'dape-disassemble)
     (define-key map "l" #'dape-breakpoint-log)
     (define-key map "e" #'dape-breakpoint-expression)
