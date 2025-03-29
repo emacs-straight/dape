@@ -735,17 +735,17 @@ See `dape-minibuffer-hint'."
 (defcustom dape-history-add 'input
   "How to push configuration options onto `dape-history'.
 
-- input: Store input as is read from minibuffer.
-- evaled: Input is evaluated then checked against base configuration
-  in `dape-configs'.  Each options that differ from base are stored.
-- evaled-dash-form: Like evaled but stores options in dash form if
-  possible.  With dash form characters after - are interpret in sh
-  like format with ENV PROGRAM ARGS.  This is useful for adapters
-  which accepts :env, :program and :args as launch options.
-  Example: \"launch - ENV=value program arg1 arg2\""
+- input: Store input as it is read from the minibuffer.
+- expanded: Each key in the input is evaluated, and only options that
+  differ from the base configuration in `dape-configs' are stored.
+- shell-like: Like expanded, but stores options in a shell-like
+  format.  Characters after - are interpreted in a shell-style format,
+  with ENV, PROGRAM, and ARGS.  Useful for adapters that accept :env,
+  :program, and :args as launch options.
+  Example: \"launch - ENV=value program arg1 arg2\"."
   :type '(choice (const :tag "Input" input)
-		 (const :tag "Evaluated input" evaled)
-		 (const :tag "Evaluated input in dash form" evaled-dash-form)))
+		 (const :tag "After evaluation of each key" expanded)
+		 (const :tag "Shell like with - separator" shell-like)))
 
 (defcustom dape-ui-debounce-time 0.1
   "Number of seconds to debounce `revert-buffer' for UI buffers."
@@ -849,11 +849,12 @@ See `cl-destructuring-bind' for bind forms."
   (let ((old-buffer (make-symbol "old-buffer")))
     `(let ((,old-buffer (current-buffer)))
        (,(car fn-args) ,@(cdr fn-args)
-        (cl-function (lambda ,vars
-                       (with-current-buffer (if (buffer-live-p ,old-buffer)
-                                                ,old-buffer
-                                              (current-buffer))
-                         ,@body)))))))
+        (cl-function
+         (lambda ,vars
+           (with-current-buffer (if (buffer-live-p ,old-buffer)
+                                    ,old-buffer
+                                  (current-buffer))
+             ,@body)))))))
 
 (defmacro dape--with-request (fn-args &rest body)
   "Call `dape-request' like FN with ARGS and execute BODY on callback.
@@ -1738,41 +1739,35 @@ See `dape-request' for expected CB signature."
 See `dape-request' for expected CB signature."
   (let ((current-nof (length (plist-get thread :stackFrames)))
         (total-frames (plist-get thread :totalFrames))
+        (value-formatting-p
+         (dape--capable-p conn :supportsValueFormattingOptions))
         (delayed-stack-trace-p
          (dape--capable-p conn :supportsDelayedStackTraceLoading)))
-    (cond
-     ((or (not (equal (plist-get thread :status) 'stopped))
-          (not (integerp (plist-get thread :id)))
-          (eql current-nof total-frames)
-          (and delayed-stack-trace-p (<= nof current-nof))
-          (and (not delayed-stack-trace-p) (> current-nof 0)))
-      (dape--request-continue cb))
-     ((dape--with-request-bind
+    (if (or (not (equal (plist-get thread :status) 'stopped))
+            (not (integerp (plist-get thread :id)))
+            (eql current-nof total-frames)
+            (and delayed-stack-trace-p (<= nof current-nof))
+            (and (not delayed-stack-trace-p) (> current-nof 0)))
+        (dape--request-continue cb)
+      (dape--with-request-bind
           ((&key stackFrames totalFrames &allow-other-keys) error)
-          (dape-request conn
-                        "stackTrace"
-                        `(:threadId
-                          ,(plist-get thread :id)
-                          ,@(when delayed-stack-trace-p
-                              (list
-                               :startFrame current-nof
-                               :levels (- nof current-nof)))
-                          ,@(when (and dape-info-stack-buffer-modules
-                                       (dape--capable-p conn :supportsValueFormattingOptions))
-                              `(:format (:module t)))))
-        (cond
-         ((not delayed-stack-trace-p)
-          (plist-put thread :stackFrames
-                     (append stackFrames nil)))
-         ;; Sanity check delayed stack trace
-         ((length= (plist-get thread :stackFrames) current-nof)
-          (plist-put thread :stackFrames
-                     (append (plist-get thread :stackFrames)
-                             stackFrames
-                             nil))))
-        (plist-put thread :totalFrames
-                   (and (numberp totalFrames) totalFrames))
-        (dape--request-continue cb error))))))
+          (dape-request
+           conn "stackTrace"
+           `( :threadId ,(plist-get thread :id)
+              ,@(when delayed-stack-trace-p
+                  `( :startFrame ,current-nof
+                     :levels ,(- nof current-nof)))
+              ,@(when (and dape-info-stack-buffer-modules value-formatting-p)
+                  `(:format (:module t)))))
+        (cond ((not delayed-stack-trace-p)
+               (plist-put thread :stackFrames (append stackFrames nil)))
+              ;; Sanity check delayed stack trace
+              ((length= (plist-get thread :stackFrames) current-nof)
+               (plist-put thread :stackFrames
+                          (append (plist-get thread :stackFrames) stackFrames
+                                  nil))))
+        (plist-put thread :totalFrames (and (numberp totalFrames) totalFrames))
+        (dape--request-continue cb error)))))
 
 (defun dape--variables (conn object cb)
   "Update OBJECTs variables by adapter CONN.
@@ -1800,25 +1795,23 @@ See `dape-request' for expected CB signature."
 Get variable data from CONN and put result on OBJECT until PRED is nil.
 PRED is called with PATH and OBJECT.
 See `dape-request' for expected CB signature."
-  (let ((objects
-         (cl-loop for variable in (or (plist-get object :scopes)
-                                      (plist-get object :variables))
-                  for name = (plist-get variable :name)
-                  for expensive-p = (eq (plist-get variable :expensive) t)
-                  when (and (not expensive-p) (funcall pred (cons name path)))
-                  collect variable)))
-    (if (not objects)
-        (dape--request-continue cb)
+  (if-let* ((objects
+             (cl-loop
+              for variable in (or (plist-get object :scopes)
+                                  (plist-get object :variables))
+              for name = (plist-get variable :name)
+              for expensive-p = (eq (plist-get variable :expensive) t)
+              when (and (not expensive-p) (funcall pred (cons name path)))
+              collect variable)))
       (let ((responses 0))
         (dolist (object objects)
           (dape--with-request (dape--variables conn object)
             (dape--with-request
-                (dape--variables-recursive conn object
-                                           (cons (plist-get object :name) path)
-                                           pred)
-              (when (length= objects
-                             (setf responses (1+ responses)))
-                (dape--request-continue cb)))))))))
+                (dape--variables-recursive
+                 conn object (cons (plist-get object :name) path) pred)
+              (when (length= objects (cl-incf responses))
+                (dape--request-continue cb))))))
+    (dape--request-continue cb)))
 
 (defun dape--evaluate-expression (conn frame-id expression context cb)
   "Send evaluate request to adapter CONN.
@@ -1909,9 +1902,9 @@ selected stack frame."
          (dolist (frame (plist-get thread :stackFrames))
            (plist-put frame :scopes nil)))))
     (dape--with-request (dape--stack-trace conn current-thread 1)
-      (when display
-        (dape--stack-frame-display conn))
-      (dape--with-request (dape--scopes conn (dape--current-stack-frame conn))
+      (when display (dape--stack-frame-display conn))
+      (dape--with-request
+          (dape--scopes conn (dape--current-stack-frame conn))
         (run-hooks 'dape-update-ui-hook)))))
 
 
@@ -2945,11 +2938,10 @@ of memory read."
              'dape--disassemble-instruction instruction)))
           (setq-local revert-buffer-function
                       (lambda (&rest _) (dape-disassemble address)))
-          (with-selected-window (display-buffer (current-buffer))
-            (goto-char
-             (or (marker-position dape--disassemble-overlay-arrow)
-                 (point-min)))
-            (run-hooks 'dape-display-source-hook)))))))
+          (select-window (display-buffer (current-buffer)))
+          (goto-char (or (marker-position dape--disassemble-overlay-arrow)
+                         (point-min)))
+          (run-hooks 'dape-display-source-hook))))))
 
 
 ;;; Breakpoints
@@ -4168,18 +4160,15 @@ current buffer with CONN config."
 
 (dape--buffer-map dape-info-variable-name-map dape-info-scope-watch-dwim)
 
-(dape--command-at-line dape-info-variable-edit
-  (dape--info-ref dape--info-variable)
+(dape--command-at-line dape-info-variable-edit (dape--info-ref dape--info-variable)
   "Edit variable value at line in dape info buffer."
-  (dape--set-variable (dape--live-connection 'stopped)
-                      dape--info-ref
-                      dape--info-variable
-                      (read-string
-                       (format "Set value of %s `%s' = "
-                               (plist-get dape--info-variable :type)
-                               (plist-get dape--info-variable :name))
-                       (or (plist-get dape--info-variable :value)
-                           (plist-get dape--info-variable :result)))))
+  (dape--set-variable
+   (dape--live-connection 'stopped) dape--info-ref dape--info-variable
+   (read-string (format "Set value of %s `%s' = "
+                        (plist-get dape--info-variable :type)
+                        (plist-get dape--info-variable :name))
+                nil nil (or (plist-get dape--info-variable :value)
+                            (plist-get dape--info-variable :result)))))
 
 (dape--buffer-map dape-info-variable-value-map dape-info-variable-edit)
 
@@ -4610,7 +4599,8 @@ Called by `comint-input-sender' in `dape-repl-mode'."
       (dape--repl-input-sender dummy-process last)))
    ;; Run command from `dape-named-commands'
    ((pcase-let* ((`(,cmd . ,args)
-                  (string-split input split-string-default-separators))
+                  (string-split (substring-no-properties input)
+                                split-string-default-separators))
                  (fn (or (alist-get cmd dape-repl-commands nil nil 'equal)
                          (and dape-repl-use-shorthand
                               (cdr (assoc cmd (dape--repl-shorthand-alist)))))))
@@ -4625,7 +4615,9 @@ Called by `comint-input-sender' in `dape-repl-mode'."
              t)
             (fn
              (dape--repl-insert-prompt)
-             (apply fn args)
+             (condition-case-unless-debug err
+                 (apply fn args)
+               (error (dape--warn "%s" (car err))))
              t))))
    ;; Evaluate expression
    (t
@@ -5203,20 +5195,19 @@ Where ALIST-KEY exists in `dape-configs'."
                                 value)))
              append (list key value))))
 
-(defun dape--config-to-string (key post-eval-config)
-  "Create string from KEY and POST-EVAL-CONFIG."
-  (pcase-let* ((config-diff (dape--config-diff key post-eval-config))
-               ((map :env :program :args) config-diff)
-               (zap-form-p (and (eq dape-history-add 'evaled-dash-form)
+(defun dape--config-to-string (key expanded-config)
+  "Create string from KEY and EXPANDED-CONFIG."
+  (pcase-let* ((diff (dape--config-diff key expanded-config))
+               ((map :env :program :args) expanded-config)
+               (zap-form-p (and (eq dape-history-add 'shell-like)
                                 (or (stringp program)
                                     (and (consp env) (keywordp (car env))
                                          (not args))))))
     (when zap-form-p
       (cl-loop for key in '(:program :env :args) do
-               (setq config-diff (map-delete config-diff key))))
+               (setq diff (map-delete diff key))))
     (concat (when key (format "%s" key))
-            (when-let* ((config-diff)
-                        (config-str (prin1-to-string config-diff)))
+            (when-let* (diff (config-str (prin1-to-string diff)))
               (format " %s" (substring config-str 1 (1- (length config-str)))))
             (when zap-form-p
               (concat " -"
@@ -5234,9 +5225,9 @@ If SIGNAL is non nil raises `user-error' on failure otherwise returns
 nil."
   (if-let* ((ensure-fn (plist-get config 'ensure)))
       (let ((default-directory
-             (or (when-let* ((command-cwd (plist-get config 'command-cwd)))
-                   (dape--config-eval-value command-cwd))
-                 default-directory)))
+             (if-let* ((command-cwd (plist-get config 'command-cwd)))
+                 (dape--config-eval-value command-cwd)
+               default-directory)))
         (condition-case err
             (or (funcall ensure-fn config) t)
           (error
@@ -5477,18 +5468,18 @@ mouse-1: Display minor mode menu"
                         (define-key map [mode-line down-mouse-1] dape-menu)
                         map))
             ":"
-            (:propertize
-             ,(when-let* ((thread-name (plist-get (dape--current-thread conn) :name)))
-                (concat thread-name " "))
-             face font-lock-constant-face
-             mouse-face mode-line-highlight
-             help-echo "mouse-1: Select thread"
-             keymap ,(let ((map (make-sparse-keymap)))
-                       (define-key map [mode-line down-mouse-1] 'dape-select-thread)
-                       map))
-            (:propertize ,(format "%s" (or (and conn (dape--state conn))
-                                           'unknown))
-                         face font-lock-doc-face)
+            ( :propertize
+              ,(when-let* ((thread-name (plist-get (dape--current-thread conn) :name)))
+                 (concat thread-name " "))
+              face font-lock-constant-face
+              mouse-face mode-line-highlight
+              help-echo "mouse-1: Select thread"
+              keymap ,(let ((map (make-sparse-keymap)))
+                        (define-key map [mode-line down-mouse-1] 'dape-select-thread)
+                        map))
+            ( :propertize ,(format "%s" (or (and conn (dape--state conn))
+                                            'unknown))
+              face font-lock-doc-face)
             ,@(when-let* ((reason (and conn (dape--state-reason conn))))
                 `("/" (:propertize ,reason face font-lock-doc-face)))
             ,@(when-let* ((conns (dape--live-connections))
