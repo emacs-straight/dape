@@ -1188,20 +1188,16 @@ as is."
 (defun dape--kill-buffers (&optional skip-process-buffers)
   "Kill all dape buffers.
 On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
-  (thread-last (buffer-list)
-               (seq-filter (lambda (buffer)
-                             (unless (and skip-process-buffers
-                                          (get-buffer-process buffer))
-                               (string-match-p "\\*dape-.+\\*"
-                                               (buffer-name buffer)))))
-               (seq-do (lambda (buffer)
-                         (condition-case err
-                             (let ((window (get-buffer-window buffer)))
-                               (kill-buffer buffer)
-                               (when (window-live-p window)
-                                 (delete-window window)))
-                           (error
-                            (message (error-message-string err))))))))
+  (cl-loop for buffer in (buffer-list)
+           when (and (not (and skip-process-buffers
+                               (get-buffer-process buffer)))
+                     (string-match-p "\\*dape-.+\\*" (buffer-name buffer)))
+           do (condition-case err
+                  (let ((window (get-buffer-window buffer)))
+                    (kill-buffer buffer)
+                    (when (window-live-p window)
+                      (delete-window window)))
+                (error (message (error-message-string err))))))
 
 (defun dape--display-buffer (buffer)
   "Display BUFFER according to `dape-buffer-window-arrangement'."
@@ -2203,25 +2199,26 @@ symbol `dape-connection'."
         (process-environment (cl-copy-list process-environment))
         (retries 30)
         process server-process)
-    (cl-loop for (key value) on (plist-get config 'command-env) by 'cddr
-             do (setenv (pcase key
-                          ((pred keywordp) (substring (format "%s" key) 1))
-                          ((or (pred symbolp) (pred stringp)) (format "%s" key))
-                          (_ (user-error "Bad type for `command-env' key %S" key)))
-                        (format "%s" value)))
+    ;; Initialize `process-environment' from `command-env'
+    (cl-loop for (key value) on (plist-get config 'command-env) by 'cddr do
+             (setenv (pcase key
+                       ((pred keywordp) (substring (format "%s" key) 1))
+                       ((or (pred symbolp) (pred stringp)) (format "%s" key))
+                       (_ (user-error "Bad type for `command-env' key %S" key)))
+                     (format "%s" value)))
     (cond
-     ;; Socket type connection
-     ((plist-get config 'port)
+     (;; Socket type connection
+      (plist-get config 'port)
       ;; Start server
       (when (plist-get config 'command)
         (let ((stderr-pipe
-               (apply #'make-pipe-process
-                      :name "dape adapter stderr"
-                      :buffer (get-buffer-create " *dape-server stderr*")
-                      :noquery t
-                      (when (plist-get config 'command-insert-stderr)
-                        `(:filter ,(lambda (_process string)
-                                     (dape--repl-insert-error string))))))
+               (with-current-buffer (get-buffer-create " *dape-adapter stderr*")
+                 (when (plist-get config 'command-insert-stderr)
+                   (add-hook 'after-change-functions
+                             (lambda (beg end _pre-change-len)
+                               (dape--repl-insert-error (buffer-substring beg end)))
+                             nil t))
+                 (current-buffer)))
               (command
                (cons (plist-get config 'command)
                      (cl-map 'list 'identity
@@ -2235,6 +2232,11 @@ symbol `dape-connection'."
                               :buffer nil
                               :stderr stderr-pipe))
           (process-put server-process 'stderr-pipe stderr-pipe)
+          ;; XXX Tramp does not allow pipe process as :stderr, but
+          ;;     `make-process' creates one for us with an unwanted
+          ;;      sentinel (`internal-default-process-sentinel').
+          (when-let* ((pipe-process (get-buffer-process stderr-pipe)))
+            (set-process-sentinel pipe-process #'ignore))
           (when dape-debug
             (dape--message "Adapter server started with %S"
                            (mapconcat #'identity command " "))))
@@ -2262,7 +2264,7 @@ symbol `dape-connection'."
               (dape--message "Connection is configurable by `host' and `port' keys")
               ;; Barf server stderr
               (when-let* (server-process
-                          (buffer (process-buffer (process-get server-process 'stderr-pipe)))
+                          (buffer (process-get server-process 'stderr-pipe))
                           (content (with-current-buffer buffer (buffer-string)))
                           ((not (string-empty-p content))))
                 (dape--repl-insert-error (concat content "\n")))
@@ -2272,8 +2274,8 @@ symbol `dape-connection'."
             (dape--message "%s to adapter established at %s:%s"
                            (if parent "Child connection" "Connection")
                            host (plist-get config 'port))))))
-     ;; Pipe type connection
-     (t
+     (;; Pipe type connection
+      t
       (let ((command
              (cons (plist-get config 'command)
                    (cl-map 'list 'identity
@@ -2306,7 +2308,6 @@ symbol `dape-connection'."
          (dape--stack-frame-cleanup)
          ;; Cleanup server process
          (when-let* ((server-process (dape--server-process conn)))
-           (delete-process (process-get server-process 'stderr-pipe))
            (delete-process server-process)
            (while (process-live-p server-process)
              (accept-process-output nil nil 0.1))))
@@ -3954,7 +3955,8 @@ See `dape-request' for expected CB signature."
 
 (dape--buffer-map dape-info-stack-line-map dape-info-stack-select
   (define-key map "m" #'dape-info-stack-memory)
-  (define-key map "M" #'dape-info-stack-disassemble))
+  (define-key map "M" #'dape-info-stack-disassemble)
+  (define-key map "D" #'dape-info-stack-disassemble))
 
 (define-derived-mode dape-info-stack-mode dape-info-parent-mode "Stack"
   "Major mode for Dape info stack."
@@ -4465,12 +4467,13 @@ If REPL buffer is not live STRING will be displayed in minibuffer."
               (setq start (point-marker))
               (let ((inhibit-read-only t))
                 (insert string))
-              ;; XXX Inserting at pos of `comint-last-prompt' ...
+              ;; XXX Inserting at position of `comint-last-prompt'...
               (when comint-last-prompt
                 (move-marker (car comint-last-prompt) (point)))
-              ;; and process marker, this forces us to move them by hand.
+              ;; ...and process marker forcing us to move marker by hand.
               (when-let* ((process (get-buffer-process buffer)))
-                (set-marker (process-mark process) (+ (point) (length dape--repl-prompt))))
+                (set-marker (process-mark process)
+                            (+ (point) (length dape--repl-prompt))))
               ;; HACK Run hooks as if `comint-output-filter' was executed
               (let ((comint-last-output-start start))
                 (run-hook-with-args 'comint-output-filter-functions string)))))
