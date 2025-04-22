@@ -3067,7 +3067,7 @@ Used as an hook on `find-file-hook'."
              (run-hooks 'dape-update-ui-hook)))
   (dape--breakpoint-maybe-remove-ff-hook))
 
-(defvar dape--original-margin nil
+(defvar-local dape--original-margin nil
   "Bookkeeping for buffer margin width.")
 
 (defun dape--indicator (string bitmap face)
@@ -3076,9 +3076,10 @@ The indicator is `propertize'd with with FACE."
   (if (and (window-system)
            (not (eql (frame-parameter (selected-frame) 'left-fringe) 0)))
       (propertize " " 'display `(left-fringe ,bitmap ,face))
-    (unless dape--original-margin
-      (setq-local dape--original-margin left-margin-width
-                  left-margin-width 2))
+    (setq-local dape--original-margin (or dape--original-margin
+                                          left-margin-width)
+                left-margin-width 2)
+    (set-window-margins (selected-window) left-margin-width)
     (propertize " " 'display `((margin left-margin)
                                ,(propertize string 'face face)))))
 
@@ -3161,6 +3162,8 @@ Handling restoring margin if necessary."
       ;; Reset margin
       (setq-local left-margin-width dape--original-margin
                   dape--original-margin nil)
+      (set-window-margins (selected-window)
+                          left-margin-width right-margin-width)
       (when-let* ((window (get-buffer-window buffer)))
         (set-window-buffer window buffer)))))
 
@@ -4585,6 +4588,7 @@ See `dape--repl-info-string' for information on INDEX."
 (defun dape--repl-input-sender (dummy-process input)
   "Send INPUT to DUMMY-PROCESS.
 Called by `comint-input-sender' in `dape-repl-mode'."
+  (setq input (string-trim-right input "[\n\r]+"))
   (cond
    ;; Run previous input
    ((and (string-empty-p input)
@@ -4594,7 +4598,7 @@ Called by `comint-input-sender' in `dape-repl-mode'."
       (dape--repl-input-sender dummy-process last)))
    ;; Run command from `dape-named-commands'
    ((pcase-let* ((`(,cmd . ,args)
-                  (string-split (substring-no-properties input)
+                  (split-string (substring-no-properties input)
                                 split-string-default-separators))
                  (fn (or (alist-get cmd dape-repl-commands nil nil #'equal)
                          (and dape-repl-use-shorthand
