@@ -1492,8 +1492,8 @@ If `dape--request-blocking' is non nil do blocking request."
                          (or (plist-get result :message) ""))))
             (timeout-fn ()
               (dape--warn
-               "Command %S timed out after %d seconds, the \
-timeout period is configurable with `dape-request-timeout'"
+               "Command %S timed out after %d seconds (see \
+`dape-request-timeout')"
                command
                dape-request-timeout)
               (funcall cb nil dape--timeout-error)))
@@ -2610,29 +2610,31 @@ With prefix argument stack is selected by index."
   (interactive (list (dape--live-connection 'stopped) 1))
   (dape-stack-select-up conn (* n -1)))
 
-(defun dape-watch-dwim (expression &optional no-add no-remove display)
-  "Toggle a watch for EXPRESSION in the debugger.
+(defun dape-watch-dwim (expressions &optional no-add no-remove display)
+  "Toggle a watch for EXPRESSIONS in the debugger.
 If NO-ADD is non nil only allow removal of an existing watch.
 If NO-REMOVE is non nil only allow adding a new watch.
 If DISPLAY is non nil display the watch buffer."
   (interactive
-   (list (string-trim
-          (completing-read
-           "Watch or unwatch symbol or expression: "
+   (list (mapcar
+          #'string-trim
+          (completing-read-multiple
+           "Watch or unwatch symbol(s) or expression: "
            (mapcar (lambda (plist) (plist-get plist :name)) dape--watched)
            nil nil nil nil
            (or (and (region-active-p)
                     (buffer-substring (region-beginning) (region-end)))
                (thing-at-point 'symbol))))
          nil nil t))
-  (if-let* ((watched
-             (cl-find expression dape--watched
-                      :key (lambda (plist) (plist-get plist :name))
-                      :test #'equal)))
-      (unless no-remove
-        (setq dape--watched (cl-delete watched dape--watched)))
-    (unless no-add
-      (push (list :name expression) dape--watched)))
+  (dolist (expression expressions)
+    (if-let* ((watched
+               (cl-find expression dape--watched
+                        :key (lambda (plist) (plist-get plist :name))
+                        :test #'equal)))
+        (unless no-remove
+          (setq dape--watched (cl-delete watched dape--watched)))
+      (unless no-add
+        (push (list :name expression) dape--watched))))
   (when display
     (dape--display-buffer (dape--info-get-buffer-create 'dape-info-watch-mode)))
   (run-hooks 'dape-update-ui-hook))
@@ -2654,7 +2656,7 @@ CONN is inferred by either last stopped or last created connection."
     (cond
      (error
       (if (string-empty-p error)
-          (dape--warn "Failed to evaluate %S" (substring-no-properties expression))
+          (dape--warn "Failed to evaluate `%s'" (substring-no-properties expression))
         (dape--repl-insert-error (concat (string-trim-right error) "\n"))))
      ((and (get-buffer "*dape-repl*")
            (numberp variablesReference)
@@ -2904,9 +2906,14 @@ of memory read."
   "View disassemble of instructions at ADDRESS."
   (interactive
    (list (string-trim
-          (read-string "Address: " nil nil
-                       (when-let* ((number (thing-at-point 'number)))
-                         (format "0x%08x" number))))))
+          (read-string
+           "Address: " nil nil
+           `(,@(when-let* ((number (thing-at-point 'number)))
+                 (list (format "0x%08x" number)))
+             ,@(when-let* ((conn (dape--live-connection 'stopped t))
+                           (address (plist-get (dape--current-stack-frame conn)
+                                               :instructionPointerReference)))
+                 (list address)))))))
   (if-let* ((conn (dape--live-connection 'stopped))
             ((not (dape--capable-p conn :supportsDisassembleRequest))))
       (user-error "Adapter does not support disassemble")
@@ -3014,16 +3021,16 @@ of memory read."
                                     (define-key map [mouse-1] mouse-1-def)
                                     map))))))
       (let ((ov (apply #'make-overlay (dape--overlay-region)))
-            (disabled-face (when disabled 'shadow)))
+            (disabled-face-p (when disabled 'shadow)))
         (overlay-put ov 'modification-hooks '(dape--breakpoint-freeze))
         (overlay-put ov 'category 'dape-breakpoint)
         (overlay-put ov 'window t)
         (pcase type
           ('log
-           (after-string ov "Log" (or disabled-face 'dape-log-face)
+           (after-string ov "Log" (or disabled-face-p 'dape-log-face)
                          "edit log message" #'dape-mouse-breakpoint-log))
           ('expression
-           (after-string ov "Cond" (or disabled-face 'dape-expression-face)
+           (after-string ov "Cond" (or disabled-face-p 'dape-expression-face)
                          "edit break condition" #'dape-mouse-breakpoint-expression))
           ('hits
            (after-string ov "Hits" 'dape-hits-face
@@ -3031,7 +3038,9 @@ of memory read."
           (_
            (overlay-put ov 'before-string
                         (dape--indicator dape-breakpoint-margin-string 'breakpoint
-                                         (or disabled-face 'dape-breakpoint-face)))))
+                                         (or (and (eq type 'until) 'font-lock-doc-face)
+                                             disabled-face-p
+                                             'dape-breakpoint-face)))))
         (setf overlay ov)))))
 
 (dape--mouse-command dape-mouse-breakpoint-toggle
@@ -3459,6 +3468,8 @@ Buffer is displayed with `dape-display-source-buffer-action'."
 
 (defvar dape--info-buffers nil "List containing `dape-info' buffers.")
 
+(defvar dape--info-buffer-display-history nil "History list in (MODE INDEX).")
+
 (defun dape--info-buffer-list ()
   "Return all live `dape-info-parent-mode'."
   (setq dape--info-buffers
@@ -3493,6 +3504,7 @@ REVERSED selects previous."
                                                    (not (dape--info-buffer-p mode index))))
                                  (cadr))
                     (car dape--info-buffer-related))))
+    (push `(,mode ,index) dape--info-buffer-display-history)
     (gdb-set-window-buffer (dape--info-get-buffer-create mode index) t)))
 
 (defvar dape-info-parent-mode-map
@@ -3521,7 +3533,7 @@ Each buffers store its own debounce context."
           (cl-call-next-method))))))
 
 (define-derived-mode dape-info-parent-mode special-mode ""
-  "Generic mode to derive all other Dape gud buffer modes from."
+  "Generic mode to derive all other info buffer modes from."
   :interactive nil
   (setq-local buffer-read-only t
               truncate-lines t
@@ -3538,16 +3550,21 @@ Each buffers store its own debounce context."
 Creates header with string NAME, mouse map to select buffer
 identified with MODE and INDEX (see `dape--info-buffer-index')
 with HELP-ECHO string, MOUSE-FACE and FACE."
-  (propertize name 'help-echo help-echo 'mouse-face mouse-face 'face face
-              'keymap
-              (gdb-make-header-line-mouse-map
-	       'mouse-1
-	       (lambda (event) (interactive "e")
-		 (save-selected-window
-		   (select-window (posn-window (event-start event)))
-                   (let ((buffer (dape--info-get-buffer-create mode index)))
-                     (with-current-buffer buffer (revert-buffer))
-                     (gdb-set-window-buffer buffer t)))))))
+  (let ((command
+         (lambda (event)
+           (interactive "e")
+           (save-selected-window
+             (select-window (posn-window (event-start event)))
+             (let ((buffer
+                    (dape--info-get-buffer-create mode index)))
+               (with-current-buffer buffer (revert-buffer))
+               (push `(,mode ,index) dape--info-buffer-display-history)
+               (gdb-set-window-buffer buffer t)))))
+        (map (make-sparse-keymap)))
+    (define-key map (vector 'header-line 'mouse-1) command)
+    (define-key map (vector 'header-line 'down-mouse-1) command)
+    (propertize name 'help-echo help-echo 'mouse-face mouse-face 'face face
+                'keymap map)))
 
 (defun dape--info-call-update-with (fn)
   "Helper for `dape--info-revert' functions.
@@ -3631,7 +3648,20 @@ buffers get displayed and how they are grouped."
              (setq buffer-displayed-p t)
              (dape--display-buffer
               (apply #'dape--info-get-buffer-create
-                     (ensure-list (car group)))))
+                     (or
+                      ;; Try to re-create the last window setup
+                      (cl-find-if
+                       (pcase-lambda (`(,hist-mode ,hist-index))
+                         (cl-find-if
+                          (pcase-lambda (`(,spec-mode ,spec-index))
+                            (and (eq hist-mode spec-mode)
+                                 (or (not spec-index)
+                                     (eq hist-index spec-index))))
+                          group
+                          :key #'ensure-list))
+                       dape--info-buffer-display-history)
+                      ;; ...or fallback to car if no history
+                      (ensure-list (car group))))))
     (when (and maybe-kill (not buffer-displayed-p))
       (cl-loop for buffer in (dape--info-buffer-list)
                do (kill-buffer buffer)))
@@ -3739,10 +3769,13 @@ buffers get displayed and how they are grouped."
                           (_ (user-error "Unable to edit breakpoint on line \
 without log or expression breakpoint"))))))
 
-(dape--buffer-map dape-info-breakpoints-mode-map dape-info-breakpoint-dwim
+(dape--buffer-map dape-info-breakpoints-mode-line-map dape-info-breakpoint-dwim
   "D" #'dape-info-breakpoint-disable
   "d" #'dape-info-breakpoint-delete
   "e" #'dape-info-breakpoint-log-edit)
+
+(defvar dape-info-breakpoints-mode-map
+  (copy-keymap dape-info-breakpoints-mode-line-map))
 
 (define-derived-mode dape-info-breakpoints-mode dape-info-parent-mode "Breakpoints"
   "Major mode for Dape info breakpoints."
@@ -3793,6 +3826,7 @@ without log or expression breakpoint"))))))
                    ('log        "Log  ")
                    ('hits       "Hits ")
                    ('expression "Cond ")
+                   ('until      "Until")
                    (_           "Break"))
                  (or
                   ;; If buffer live, display part of the line
@@ -3844,9 +3878,12 @@ without log or expression breakpoint"))))))
             (" \\(started\\)"  (1 font-lock-string-face))))
   "Keywords for `dape-info-threads-mode'.")
 
-(dape--buffer-map dape-info-threads-mode-map dape-info-select-thread
+(dape--buffer-map dape-info-threads-mode-line-map dape-info-select-thread
   ;; TODO Add bindings for individual threads.
   )
+
+(defvar dape-info-threads-mode-map
+  (copy-keymap dape-info-threads-mode-line-map))
 
 (defun dape--info-threads-stack-info (conn cb)
   "Populate stack frame info for CONNs threads.
@@ -3974,14 +4011,16 @@ See `dape-request' for expected CB signature."
 
 (dape--command-at-line dape-info-stack-disassemble (dape--info-frame)
   "View disassemble at address of frame."
-  (if-let* ((ref (plist-get dape--info-frame :instructionPointerReference)))
-      (dape-disassemble ref)
+  (if-let* ((address (plist-get dape--info-frame :instructionPointerReference)))
+      (dape-disassemble address)
     (user-error "No address for frame")))
 
-(dape--buffer-map dape-info-stack-mode-map dape-info-stack-select
+(dape--buffer-map dape-info-stack-mode-line-map dape-info-stack-select
   "m" #'dape-info-stack-memory
   "M" #'dape-info-stack-disassemble
   "D" #'dape-info-stack-disassemble)
+
+(defvar dape-info-stack-mode-map (copy-keymap dape-info-stack-mode-line-map))
 
 (define-derived-mode dape-info-stack-mode dape-info-parent-mode "Stack"
   "Major mode for Dape info stack."
@@ -4070,7 +4109,10 @@ current buffer with CONN config."
           (pop-to-buffer (marker-buffer marker))
         (user-error "Unable to open module")))))
 
-(dape--buffer-map dape-info-module-mode-map dape-info-modules-goto)
+(dape--buffer-map dape-info-modules-mode-line-map dape-info-modules-goto)
+
+(defvar dape-info-modules-mode-map
+  (copy-keymap dape-info-modules-mode-line-map))
 
 (define-derived-mode dape-info-modules-mode dape-info-parent-mode "Modules"
   "Major mode for Dape info modules."
@@ -4118,7 +4160,10 @@ current buffer with CONN config."
           (pop-to-buffer (marker-buffer marker))
         (user-error "Unable to get source")))))
 
-(dape--buffer-map dape-info-sources-mode-map dape-info-sources-goto)
+(dape--buffer-map dape-info-sources-mode-line-map dape-info-sources-goto)
+
+(defvar dape-info-sources-mode-map
+  (copy-keymap dape-info-sources-mode-line-map))
 
 (define-derived-mode dape-info-sources-mode dape-info-parent-mode "Sources"
   "Major mode for Dape info sources."
@@ -4172,8 +4217,8 @@ current buffer with CONN config."
 
 (dape--command-at-line dape-info-scope-watch-dwim (dape--info-variable)
   "Watch variable or remove from watch at line in dape info buffer."
-  (dape-watch-dwim (or (plist-get dape--info-variable :evaluateName)
-                       (plist-get dape--info-variable :name))
+  (dape-watch-dwim `(,(or (plist-get dape--info-variable :evaluateName)
+                          (plist-get dape--info-variable :name)))
                    (eq major-mode 'dape-info-watch-mode)
                    (eq major-mode 'dape-info-scope-mode))
   (revert-buffer))
@@ -4222,18 +4267,17 @@ current buffer with CONN config."
            (dape--info-get-buffer-create 'dape-info-breakpoints-mode))
           (run-hooks 'dape-update-ui-hook))))))
 
-(defvar dape-info-variable-map
+(defvar dape-info-scope-mode-line-map
   (let ((map (make-sparse-keymap)))
     (define-key map "e" #'dape-info-scope-toggle)
     (define-key map "W" #'dape-info-scope-watch-dwim)
     (define-key map "=" #'dape-info-variable-edit)
     (define-key map "b" #'dape-info-scope-data-breakpoint)
     map)
-  "Keymap for buffers or regions displaying variables.")
+  "Keymap for buffers displaying variables.")
 
 (defvar dape-info-scope-mode-map
-  (make-composed-keymap dape-info-variable-map dape-info-parent-mode-map)
-  "Local keymap for dape scope buffers.")
+  (copy-keymap dape-info-scope-mode-line-map))
 
 (defun dape--info-locals-table-columns-list (alist)
   "Format and arrange the columns in locals display based on ALIST."
@@ -4356,11 +4400,12 @@ calls should continue.  If NO-HANDLES is non nil skip + - handles."
 
 ;;; Info watch buffer
 
+(defvar dape-info-watch-mode-line-map (copy-keymap dape-info-scope-mode-line-map))
+
 (defvar dape-info-watch-mode-map
-  (let ((map (make-composed-keymap nil dape-info-scope-mode-map)))
+  (let ((map (make-composed-keymap (copy-keymap dape-info-watch-mode-line-map))))
     (define-key map "\C-x\C-q" #'dape-info-watch-edit-mode)
-    map)
-  "Local keymap for dape watch buffer.")
+    map))
 
 (define-derived-mode dape-info-watch-mode dape-info-parent-mode "Watch"
   "Major mode for Dape info watch."
@@ -4567,7 +4612,7 @@ The search is done backwards from POINT.  The line is marked with
     (dape--info-scope-add-variable table variable nil '(repl) #'dape--variable-expanded-p)
     (dape--repl-make-region-string (gdb-table-string table " ")
                                    (apply-partially #'dape--repl-variable variable)
-                                   dape-info-variable-map)))
+                                   dape-info-scope-mode-line-map)))
 
 (defun dape--repl-info-string (mode index)
   "Return info MODE buffer content as string.
@@ -4578,11 +4623,11 @@ See `dape--info-buffer-index' for information on INDEX."
     (let ((dape-ui-debounce-time 0)
           (dape--request-blocking t))
       (revert-buffer))
-    (font-lock-ensure)
+    (ignore-errors (font-lock-ensure))
     (dape--repl-make-region-string
      (buffer-substring (point-min) (point-max))
      (apply-partially #'dape--repl-info-string mode index)
-     (symbol-value (derived-mode-map-name mode)))))
+     (symbol-value (intern (concat (symbol-name mode) "-line-map"))))))
 
 (defun dape--repl-insert-info-buffer (mode &optional index)
   "Insert content of MODE info buffer into repl.
@@ -4758,7 +4803,7 @@ If INDEX is non nil parse into number and show n+1th scope."
   "List watched variables in *dape-repl* buffer.
 If EXPRESSIONS is non blank add or remove expression to watch list."
   (when expressions
-    (dape-watch-dwim (string-join expressions " ")))
+    (dape-watch-dwim `(,(string-join expressions " "))))
   (dape--repl-insert-info-buffer 'dape-info-watch-mode))
 
 (define-derived-mode dape-repl-mode comint-mode "REPL"
@@ -4834,135 +4879,151 @@ debugger.  An empty line will repeat the last command.\n\n"
 (defface dape-inlay-hint-face '((t (:height 0.8 :inherit shadow)))
   "Face used for inlay-hint overlays.")
 
-(defface dape-inlay-hint-highlight-face '((t (:height 0.8 :inherit (bold highlight))))
+(defface dape-inlay-hint-highlight-face '((t (:height 0.8 :inherit highlight)))
   "Face used for highlighting parts of inlay-hint overlays.")
 
 (defvar dape--inlay-hint-overlays nil "List of all hint overlays.")
 (defvar dape--inlay-hint-debounce-timer (timer-create) "Debounce timer.")
-(defvar dape--inlay-hints-symbols-fn #'dape--inlay-hint-symbols
+(defvar dape--inlay-hint-symbols-fn #'dape--inlay-hint-collect-symbols
   "Function returning variable names.")
 (defvar dape--inlay-hint-seperator (propertize " | " 'face 'dape-inlay-hint-face)
   "Hint delimiter.")
 
-(defun dape--inlay-hint-symbols (beg end)
-  "Return list of variable candidates from BEG to END."
-  (unless (<= (- end beg) 300)
-    ;; Sanity clamp beg and end
-    (setq end (+ beg 300)))
+(defun dape--inlay-hint-collect-symbols (start end)
+  "Return list of variable symbol candidates between START and END.
+Excludes symbols that are part of strings, comments or documentation."
+  (unless (<= (- end start) 300)
+    ;; Clamp the region size to prevent performance issues
+    (setq end (+ start 300)))
   (save-excursion
-    (goto-char beg)
+    (goto-char start)
     (cl-loop for symbol = (thing-at-point 'symbol)
-             when
-             (and symbol
-                  (not (memql (get-text-property 0 'face symbol)
-                              '(font-lock-string-face
-                                font-lock-doc-face
-                                font-lock-comment-face))))
-             collect (list symbol) into symbols
-             for last-point = (point)
+             when (and symbol
+                       ;; Skip symbols in strings, comments, or docstrings
+                       (not (memql (get-text-property 0 'face symbol)
+                                   '(font-lock-string-face
+                                     font-lock-doc-face
+                                     font-lock-comment-face))))
+             collect (list symbol) into symbol-list
+             for previous-point = (point)
              do (forward-thing 'symbol)
-             while (and (< last-point (point))
+             while (and (< previous-point (point))
                         (<= (point) end))
-             finally return (delete-dups symbols))))
+             finally return (delete-dups symbol-list))))
 
-(defun dape--inlay-hint-add ()
-  "Create inlay hint at current line."
-  (when-let* ((ov dape--stack-position-overlay)
-              (buffer (overlay-buffer ov))
-              (new-head
-               (with-current-buffer buffer
-                 (pcase-let ((`(,beg . ,end)
-                              (save-excursion
-                                (goto-char (overlay-start ov))
-                                (beginning-of-line)
-                                (cons (point) (line-end-position)))))
-                   (unless (cl-find-if (lambda (ov)
-                                         (eq (overlay-get ov 'category)
-                                             'dape-inlay-hint))
-                                       (overlays-in beg end))
-                     (let ((new-head (make-overlay beg end)))
-                       (overlay-put new-head 'category 'dape-inlay-hint)
-                       (overlay-put new-head 'dape-symbols
-                                    (funcall dape--inlay-hints-symbols-fn
-                                             beg end))
-                       new-head))))))
+(defun dape--inlay-hint-create-overlay ()
+  "Create and prepare new overlay and maintain the old ones."
+  (when-let*
+      ((stack-overlay dape--stack-position-overlay)
+       (buffer (overlay-buffer stack-overlay))
+       (overlay
+        (with-current-buffer buffer
+          (pcase-let ((`(,line-start . ,line-end)
+                       (save-excursion
+                         (goto-char (overlay-start stack-overlay))
+                         (beginning-of-line)
+                         (cons (point) (line-end-position)))))
+            (unless (cl-find 'dape-inlay-hint
+                             (overlays-in line-start line-end)
+                             :key (lambda (ov) (overlay-get ov 'category)))
+              (let ((overlay (make-overlay line-start line-end)))
+                (overlay-put overlay 'category 'dape-inlay-hint)
+                (overlay-put overlay 'dape-symbols
+                             (funcall dape--inlay-hint-symbols-fn
+                                      line-start line-end))
+                overlay))))))
+    ;; Maintain the hints, keeping old ones based on value of
+    ;; `dape-inlay-hints'.
     (setq dape--inlay-hint-overlays
-          (cl-loop for inlay-hint in (cons new-head dape--inlay-hint-overlays)
-                   for i from 0
-                   if (< i (if (eq dape-inlay-hints t) 2 dape-inlay-hints))
-                   collect inlay-hint
-                   else do (delete-overlay inlay-hint)))))
+          (cl-loop for overlay in (cons overlay dape--inlay-hint-overlays)
+                   for index from 0
+                   for max-overlays = (if (eq dape-inlay-hints t)
+                                          2
+                                        dape-inlay-hints)
+                   if (< index max-overlays)
+                   collect overlay
+                   else do (delete-overlay overlay)))))
 
-(defun dape--inlay-hint-update-1 (scopes)
-  "Helper for `dape--inlay-hint-update-1'.
-Update `dape--inlay-hint-overlays' from SCOPES."
-  ;; Match variables with inlay hints and mark update
+(defun dape--inlay-hint-update-overlay-contents (scopes)
+  "Update overlay after-string variables in SCOPES.
+This is a helper function for `dape-inlay-hints-update'."
+  ;; 1. Update each overlay's symbol list with (NAME VALUE UPDATED-P)
   (cl-loop
-   with symbols =
-   (cl-loop for inlay-hint in dape--inlay-hint-overlays
-            when (overlayp inlay-hint)
-            append (overlay-get inlay-hint 'dape-symbols))
+   with all-symbols =
+   (cl-loop for overlay in dape--inlay-hint-overlays
+            when (overlayp overlay)
+            append (overlay-get overlay 'dape-symbols))
    for scope in (reverse scopes) do
    (cl-loop for variable in (plist-get scope :variables)
-            for new = (plist-get variable :value)
-            for var-name = (plist-get variable :name) do
-            (cl-loop for cons in symbols for (hint-name old) = cons
-                     for updated-p = (and old (not (equal old new)))
-                     when (equal var-name hint-name) do
-                     (setcdr cons (list new updated-p)))))
-  ;; Format strings
+            for value = (plist-get variable :value)
+            for name = (plist-get variable :name) do
+            (cl-loop for symbol-entry in all-symbols
+                     for (hint-name previous-value) = symbol-entry
+                     for updated-p = (and previous-value
+                                          (not (equal previous-value value)))
+                     when (equal name hint-name) do
+                     (setcdr symbol-entry `(,value ,updated-p)))))
+  ;; 2. Format and display the overlays after-string's
   (cl-loop
-   for inlay-hint in dape--inlay-hint-overlays
-   when (overlayp inlay-hint) do
-   (cl-loop with symbols = (overlay-get inlay-hint 'dape-symbols)
-            for (symbol value update) in symbols
-            when value collect
-            (concat
-             (propertize
-              (format "%s:" symbol)
-              'face 'dape-inlay-hint-face
-              'mouse-face 'highlight
-              'keymap
-              (let ((map (make-sparse-keymap))
-                    (sym symbol))
-                (define-key map [mouse-1]
-                            (lambda ()
-                              (interactive)
-                              (dape-watch-dwim sym nil t t)))
-                map)
-              'help-echo
-              (format "mouse-1: add `%s' to watch" symbol))
-             " "
-             (propertize
-              (truncate-string-to-width
-               (substring value 0 (string-match-p "\n" value))
-               dape-inlay-hints-variable-name-max nil nil t)
-              'help-echo value
-              'face (if update 'dape-inlay-hint-highlight-face
-                      'dape-inlay-hint-face)))
-            into after-string finally do
-            (when after-string
-              (thread-last (mapconcat #'identity after-string
-                                      dape--inlay-hint-seperator)
-                           (format "  %s")
-                           (overlay-put inlay-hint 'after-string))))))
+   for overlay in dape--inlay-hint-overlays
+   when (overlayp overlay) do
+   (cl-loop
+    with symbols = (overlay-get overlay 'dape-symbols)
+    for (symbol-name value updated-p) in symbols
+    when value collect
+    (concat
+     ;; Variable name with interactive properties
+     (propertize
+      (format "%s :" symbol-name)
+      'face 'dape-inlay-hint-face
+      'mouse-face 'highlight
+      'keymap
+      (let ((keymap (make-sparse-keymap))
+            (captured-symbol symbol-name))
+        (define-key keymap [mouse-1]
+                    (lambda ()
+                      (interactive)
+                      (dape-watch-dwim `(,captured-symbol) nil t t)))
+        keymap)
+      'help-echo
+      (format "mouse-1: add `%s' to watch" symbol-name))
+     " "
+     ;; ..and value, truncating if necessary
+     (propertize
+      (truncate-string-to-width
+       (substring value 0 (string-match-p "\n" value))
+       dape-inlay-hints-variable-name-max nil nil t)
+      'help-echo value
+      'face (if updated-p
+                'dape-inlay-hint-highlight-face
+              'dape-inlay-hint-face)))
+    into formatted-strings
+    ;; Set after-string to display hint
+    finally do
+    (when formatted-strings
+      (thread-last (mapconcat #'identity formatted-strings
+                              dape--inlay-hint-seperator)
+                   (format "  %s")
+                   (overlay-put overlay 'after-string))))))
 
 (defun dape-inlay-hints-update ()
-  "Update inlay hints."
+  "Update inlay hints with current variable values."
   (when-let* (((or (eq dape-inlay-hints t)
                    (and (numberp dape-inlay-hints)
                         (< 0 dape-inlay-hints))))
-              (conn (dape--live-connection 'stopped t))
-              (stack (dape--current-stack-frame conn))
-              (scopes (plist-get stack :scopes)))
-    (dape--inlay-hint-add)
+              (connection (dape--live-connection 'stopped t))
+              (current-frame (dape--current-stack-frame connection))
+              (scopes (plist-get current-frame :scopes)))
+    ;; Prepare a new overlay for current selected stack's position
+    (dape--inlay-hint-create-overlay)
+    ;; Fetch all scopes
     (dape--with-debounce dape--inlay-hint-debounce-timer 0.05
       (let ((responses 0))
         (dolist (scope scopes)
-          (dape--with-request (dape--variables conn scope)
-            (setf responses (1+ responses))
-            (when (length= scopes responses)
-              (dape--inlay-hint-update-1 scopes))))))))
+          (dape--with-request (dape--variables connection scope)
+            (when (length= scopes (cl-incf responses))
+              ;; Update each overlay with the new variables
+              (dape--inlay-hint-update-overlay-contents scopes))))))))
 
 (defun dape--inlay-hints-clean-up ()
   "Delete inlay hint overlays."
@@ -4978,34 +5039,37 @@ Update `dape--inlay-hint-overlays' from SCOPES."
 
 ;;; Run until point
 
-(defvar dape--until-breakpoints nil)
-
 (defun dape-until (conn)
   "Run until point.
 CONN is inferred for interactive invocations."
   (interactive (list (or (dape--live-connection 'stopped t)
-                         (dape--live-connection 'last))))
-  (let (;; Block to ensure breakpoints changes before continue
-        (dape--request-blocking t))
-    ;; Disable all non disabled breakpoints temporarily
-    (cl-loop for breakpoint in dape--breakpoints
-             unless (dape--breakpoint-disabled breakpoint)
-             do (dape--breakpoint-disable breakpoint 'until)
-             finally do (dape--breakpoints-update))
-    ;; Bookkeeping - store run to point breakpoint
-    (push (dape-breakpoint-toggle) dape--until-breakpoints))
-  (when (dape--stopped-threads conn)
-    (dape-continue conn)))
+                         (dape--live-connection 'parent))))
+  (if (cl-member 'until (dape--breakpoints-at-point)
+                 :key #'dape--breakpoint-type)
+      (dape-breakpoint-remove-at-point)
+    (let (;; Block to ensure breakpoints changes before continue
+          (dape--request-blocking t))
+      ;; Disable all non disabled breakpoints temporarily
+      (cl-loop for breakpoint in dape--breakpoints
+               unless (or (dape--breakpoint-disabled breakpoint)
+                          (eq (dape--breakpoint-type breakpoint) 'until))
+               do (dape--breakpoint-disable breakpoint 'until)
+               finally do (dape--breakpoints-update))
+      (when-let* ((breakpoint (dape--breakpoint-place 'until)))
+        ;; Bookkeeping - store until breakpoint
+        (when (dape--stopped-threads conn)
+          (dape-continue conn))))))
 
 (defun dape--until-reset ()
   "Reset until state."
   (cl-loop for breakpoint in dape--breakpoints
+           ;; Remove all `until' breakpoints
+           when (eq (dape--breakpoint-type breakpoint) 'until)
+           do (dape--breakpoint-remove breakpoint)
+           ;; ..and re-enable breakpoints disabled
            when (eq (dape--breakpoint-disabled breakpoint) 'until)
            do (dape--breakpoint-disable breakpoint nil)
-           finally do (dape--breakpoints-update))
-  (cl-loop for breakpoint in dape--until-breakpoints
-           when breakpoint do (dape--breakpoint-remove breakpoint)
-           finally do (setq dape--until-breakpoints nil)))
+           finally (dape--breakpoints-update)))
 
 (add-hook 'dape-active-mode-hook #'dape--until-reset)
 (add-hook 'dape-stopped-hook #'dape--until-reset)
