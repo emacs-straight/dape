@@ -641,7 +641,7 @@ left-to-right display order of the properties."
   "Show file information or library names in threads buffer."
   :type 'boolean)
 
-(defcustom dape-info-thread-buffer-addresses t
+(defcustom dape-info-thread-buffer-addresses nil
   "Show addresses for thread frames in threads buffer."
   :type 'boolean)
 
@@ -2619,7 +2619,7 @@ If DISPLAY is non nil display the watch buffer."
    (list (mapcar
           #'string-trim
           (completing-read-multiple
-           "Watch or unwatch symbol(s) or expression: "
+           "Watch or unwatch symbol(s) or expression(s): "
            (mapcar (lambda (plist) (plist-get plist :name)) dape--watched)
            nil nil nil nil
            (or (and (region-active-p)
@@ -2861,7 +2861,7 @@ If REUSE-BUFFER is non nil reuse the current buffer to display result
 of memory read."
   (interactive
    (list (string-trim
-          (read-string "Address: " nil nil
+          (read-string "View memory at address: " nil nil
                        (when-let* ((number (thing-at-point 'number)))
                          (format "0x%08x" number))))))
   (let ((conn (dape--live-connection 'stopped)))
@@ -2907,7 +2907,7 @@ of memory read."
   (interactive
    (list (string-trim
           (read-string
-           "Address: " nil nil
+           "Disassemble at address: " nil nil
            `(,@(when-let* ((number (thing-at-point 'number)))
                  (list (format "0x%08x" number)))
              ,@(when-let* ((conn (dape--live-connection 'stopped t))
@@ -3835,8 +3835,13 @@ without log or expression breakpoint"))))))
                      (if-let* ((file (buffer-file-name buffer)))
                          (dape--format-file-line file line)
                        (format "%s:%d" (buffer-name buffer) line))
-                     (dape--with-line buffer line
-                       (concat " " (string-trim (or (thing-at-point 'line) ""))))))
+                     (concat
+                      " "
+                      (thread-first
+                        (dape--with-line buffer line
+                          (or (thing-at-point 'line) ""))
+                        (string-trim-right)
+                        (truncate-string-to-width 80 nil nil t)))))
                   ;; Otherwise just show path:line
                   (when-let* ((path (dape--breakpoint-path breakpoint)))
                     (dape--format-file-line path line))))
@@ -3872,10 +3877,12 @@ without log or expression breakpoint"))))))
   (revert-buffer))
 
 (defvar dape--info-threads-font-lock-keywords
-  (append gdb-threads-font-lock-keywords
-          '((" \\(unknown\\)"  (1 font-lock-warning-face))
-            (" \\(exited\\)"  (1 font-lock-warning-face))
-            (" \\(started\\)"  (1 font-lock-string-face))))
+  '(("in \\([^ ^(]+\\)"  (1 font-lock-function-name-face))
+    (" \\(unknown\\)"  (1 font-lock-warning-face))
+    (" \\(stopped\\)"  (1 font-lock-warning-face))
+    (" \\(exited\\)"  (1 font-lock-warning-face))
+    (" \\(running\\)"  (1 font-lock-string-face))
+    (" \\(started\\)"  (1 font-lock-string-face)))
   "Keywords for `dape-info-threads-mode'.")
 
 (dape--buffer-map dape-info-threads-mode-line-map dape-info-select-thread
@@ -3925,6 +3932,7 @@ See `dape-request' for expected CB signature."
   "Major mode for dape info threads."
   :interactive nil
   (setq font-lock-defaults '(dape--info-threads-font-lock-keywords)
+        truncate-lines nil
         dape--info-thread-position (make-marker))
   (add-to-list 'overlay-arrow-variable-list 'dape--info-thread-position))
 
@@ -3994,7 +4002,7 @@ See `dape-request' for expected CB signature."
   "`dape-info-stack-mode' marker for `overlay-arrow-variable-list'.")
 
 (defvar dape--info-stack-font-lock-keywords
-  '(("^[ 0-9]+ \\([^ ]+\\)"  (1 font-lock-function-name-face)))
+  '(("^[ 0-9]+ \\([^ ^(]+\\)"  (1 font-lock-function-name-face)))
   "Font lock keywords used in `gdb-frames-mode'.")
 
 (dape--command-at-line dape-info-stack-select (dape--info-frame)
