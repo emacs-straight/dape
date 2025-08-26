@@ -777,7 +777,10 @@ Debug logging has an noticeable effect on performance."
 (defface dape-breakpoint-face '((t :inherit font-lock-keyword-face))
   "Face used to display breakpoint overlays.")
 
-(defface dape-log-face '((t :inherit font-lock-string-face
+(defface dape-breakpoint-until-face '((t :inherit font-lock-doc-face))
+  "Face used to display until breakpoint overlays.")
+
+(defface dape-log-face '((t :inherit dape-breakpoint-face
                             :height 0.85 :box (:line-width -1)))
   "Face used to display log breakpoints.")
 
@@ -785,7 +788,7 @@ Debug logging has an noticeable effect on performance."
                                    :height 0.85 :box (:line-width -1)))
   "Face used to display conditional breakpoints.")
 
-(defface dape-hits-face '((t :inherit font-lock-number-face
+(defface dape-hits-face '((t :inherit dape-breakpoint-face
                              :height 0.85 :box (:line-width -1)))
   "Face used to display hits breakpoints.")
 
@@ -3021,26 +3024,29 @@ of memory read."
                                     (define-key map [mouse-1] mouse-1-def)
                                     map))))))
       (let ((ov (apply #'make-overlay (dape--overlay-region)))
-            (disabled-face-p (when disabled 'shadow)))
+            (maybe-disabled-face (when disabled 'shadow)))
         (overlay-put ov 'modification-hooks '(dape--breakpoint-freeze))
         (overlay-put ov 'category 'dape-breakpoint)
         (overlay-put ov 'window t)
         (pcase type
           ('log
-           (after-string ov "Log" (or disabled-face-p 'dape-log-face)
+           (after-string ov "Log" (or maybe-disabled-face 'dape-log-face)
                          "edit log message" #'dape-mouse-breakpoint-log))
           ('expression
-           (after-string ov "Cond" (or disabled-face-p 'dape-expression-face)
+           (after-string ov "Cond" (or maybe-disabled-face 'dape-expression-face)
                          "edit break condition" #'dape-mouse-breakpoint-expression))
           ('hits
-           (after-string ov "Hits" 'dape-hits-face
-                         "edit break hit condition" #'dape-mouse-breakpoint-hits))
+           (after-string ov "Hits" (or maybe-disabled-face 'dape-hits-face)
+                         "edit break hit condition"
+                         #'dape-mouse-breakpoint-hits))
+          ('until
+           (overlay-put ov 'before-string
+                        (dape--indicator dape-breakpoint-margin-string 'breakpoint
+                                         'dape-breakpoint-until-face)))
           (_
            (overlay-put ov 'before-string
                         (dape--indicator dape-breakpoint-margin-string 'breakpoint
-                                         (or (and (eq type 'until) 'font-lock-doc-face)
-                                             disabled-face-p
-                                             'dape-breakpoint-face)))))
+                                         (or maybe-disabled-face 'dape-breakpoint-face)))))
         (setf overlay ov)))))
 
 (dape--mouse-command dape-mouse-breakpoint-toggle
@@ -5069,15 +5075,18 @@ CONN is inferred for interactive invocations."
           (dape-continue conn))))))
 
 (defun dape--until-reset ()
-  "Reset until state."
-  (cl-loop for breakpoint in dape--breakpoints
+  "Reset run until point state."
+  (cl-loop with update-required-p
+           for breakpoint in dape--breakpoints
            ;; Remove all `until' breakpoints
            when (eq (dape--breakpoint-type breakpoint) 'until)
            do (dape--breakpoint-remove breakpoint)
-           ;; ..and re-enable breakpoints disabled
+           ;; ...and re-enable disabled breakpoints
            when (eq (dape--breakpoint-disabled breakpoint) 'until)
-           do (dape--breakpoint-disable breakpoint nil)
-           finally (dape--breakpoints-update)))
+           do
+           (setq update-required-p t)
+           (dape--breakpoint-disable breakpoint nil)
+           finally (when update-required-p (dape--breakpoints-update))))
 
 (add-hook 'dape-active-mode-hook #'dape--until-reset)
 (add-hook 'dape-stopped-hook #'dape--until-reset)
