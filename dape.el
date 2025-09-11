@@ -1238,12 +1238,17 @@ On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
        (`(,fns . ,alist)
         (pcase dape-buffer-window-arrangement
           ((or 'left 'right)
-           (cons '(display-buffer-in-side-window)
-                 (pcase (cons mode group)
-                   (`(dape-repl-mode . ,_) '((side . bottom) (slot . -1)))
-                   (`(dape-shell-mode . ,_) '((side . bottom) (slot . 0)))
-                   (`(,_ . ,index) `((side . ,dape-buffer-window-arrangement)
-                                     (slot . ,(1- index)))))))
+           (pcase mode
+             ('dape-repl-mode
+              `((display-buffer-in-side-window)
+                (side . bottom) (slot . -1)))
+             ('dape-shell-mode
+              `((display-buffer-in-side-window)
+                (side . bottom) (slot . 0)))
+             ((guard group)
+              `((display-buffer-in-side-window)
+                (side . ,dape-buffer-window-arrangement)
+                (slot . ,(1- group))))))
           ('gud
            (pcase mode
              ('dape-repl-mode
@@ -1263,7 +1268,9 @@ On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
         (when group (intern (format "dape-info-%s" group)))))
     (display-buffer buffer
                     `((display-buffer-reuse-window . ,fns)
-                      (category . ,category) ,@alist))))
+                      (category . ,category)
+                      (dedicated . 'weakly)
+                      ,@alist))))
 
 (defmacro dape--mouse-command (name doc command)
   "Create mouse command with NAME, DOC which call COMMAND."
@@ -1969,16 +1976,22 @@ If DISPLAY-SOURCE-P is non-nil, display displayable top frame."
 (cl-defmethod dape-handle-request (conn (_command (eql runInTerminal)) arguments)
   "Handle runInTerminal requests.
 Starts a new adapter CONNs from ARGUMENTS."
-  (let ((default-directory
-         (or (when-let* ((cwd (plist-get arguments :cwd)))
-               (dape--file-name-local conn cwd))
-             default-directory))
-        (process-environment
-         (or (cl-loop for (key value) on (plist-get arguments :env) by 'cddr
-                      collect
-                      (format "%s=%s" (substring (format "%s" key) 1) value))
-             process-environment))
-        (buffer (get-buffer-create "*dape-shell*")))
+  (let* ((default-directory
+          (or (when-let* ((cwd (plist-get arguments :cwd)))
+                (dape--file-name-local conn cwd))
+              default-directory))
+         (process-environment
+          (append
+           (cl-loop for (key value) on (plist-get arguments :env) by 'cddr
+                    collect
+                    (format "%s=%s" (substring (format "%s" key) 1) value))
+           ;; XXX Compat with directory-aware environment managing
+           ;; modes.  Capturing environment after `run-mode-hooks'
+           ;; have been called in `default-directory'.
+           (with-temp-buffer
+             (fundamental-mode) process-environment)
+           process-environment))
+         (buffer (get-buffer-create "*dape-shell*")))
     (with-current-buffer buffer
       (dape-shell-mode)
       (shell-command-save-pos-or-erase))
@@ -2224,7 +2237,7 @@ Killing the adapter and it's CONN."
   (let ((child-conn-p (dape--parent conn)))
     (dape--with-request (dape-kill conn)
       (when (not child-conn-p)
-        ;; HACK remove duplicated terminated print for dlv
+        ;; XXX Remove duplicated terminated print for dlv
         (unless (eq (dape--state conn) 'terminated)
           (dape--message "Session terminated"))
         (dape--update-state conn 'terminated)
@@ -2926,7 +2939,7 @@ of memory read."
                       "Write memory with `\\[save-buffer]'"))))
         (setq dape--memory-address address)
         (revert-buffer))
-      (select-window (display-buffer buffer)))))
+      (select-window (dape--display-buffer buffer)))))
 
 
 ;;; Disassemble viewer
@@ -3023,7 +3036,7 @@ If DISPLAY-P is non-nil, display buffer."
           (setq-local revert-buffer-function
                       (lambda (&rest _) (dape-disassemble address)))
           (when (or display-p (marker-position dape--disassemble-overlay-arrow))
-            (select-window (display-buffer (current-buffer))))
+            (select-window (dape--display-buffer (current-buffer))))
           (goto-char (or (marker-position dape--disassemble-overlay-arrow)
                          (point-min)))
           (when (marker-position dape--disassemble-overlay-arrow)
