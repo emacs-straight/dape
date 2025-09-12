@@ -4359,12 +4359,19 @@ current buffer with CONN config."
            (dape--info-get-buffer-create 'dape-info-breakpoints-mode))
           (run-hooks 'dape-update-ui-hook))))))
 
+(dape--command-at-line dape-info-variable-memory (dape--variable)
+  "Display memory for variable's address at current line."
+  (if-let* ((memory-reference (plist-get dape--variable :memoryReference)))
+      (dape-memory memory-reference)
+    (user-error "Variable does not have a memory reference")))
+
 (defvar dape-info-scope-mode-line-map
   (let ((map (make-sparse-keymap)))
     (define-key map "e" #'dape-info-scope-toggle)
     (define-key map "W" #'dape-info-scope-watch-dwim)
     (define-key map "=" #'dape-info-variable-edit)
     (define-key map "b" #'dape-info-scope-data-breakpoint)
+    (define-key map "m" #'dape-info-variable-memory)
     map)
   "Keymap for buffers displaying variables.")
 
@@ -5143,6 +5150,9 @@ This is a helper function for `dape-inlay-hints-update'."
 CONN is inferred for interactive invocations."
   (interactive (list (or (dape--live-connection 'stopped t)
                          (dape--live-connection 'parent))))
+  ;; Ensure that `dape-until' state is reset
+  (add-hook 'dape-active-mode-hook #'dape--until-reset)
+  (add-hook 'dape-stopped-hook #'dape--until-reset)
   (if (cl-member 'until (dape--breakpoints-at-point)
                  :key #'dape--breakpoint-type)
       (dape-breakpoint-remove-at-point)
@@ -5171,9 +5181,6 @@ CONN is inferred for interactive invocations."
              (dape--breakpoint-disable breakpoint nil))))
     (when notification-required-p
       (dape--breakpoint-notify-all))))
-
-(add-hook 'dape-active-mode-hook #'dape--until-reset)
-(add-hook 'dape-stopped-hook #'dape--until-reset)
 
 
 ;;; Minibuffer config hints
