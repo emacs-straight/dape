@@ -738,6 +738,10 @@ compilation is successful."
   "Show `dape-configs' hints in minibuffer."
   :type 'boolean)
 
+(defcustom dape-read-config-hook nil
+  "Called before `dape-configs' is evaluated into completion candidates."
+  :type 'hook)
+
 (defcustom dape-minibuffer-hint-ignore-properties
   '( ensure fn modes command command-args command-env command-insert-stderr
      defer-launch-attach :type :request)
@@ -794,7 +798,8 @@ Debug logging has an noticeable effect on performance."
   "Face used to display hits breakpoints.")
 
 (defface dape-exception-description-face '((t :inherit (error tooltip)
-                                              :extend t))
+                                              :extend t
+                                              :stipple nil))
   "Face used to display exception descriptions inline.")
 
 (defface dape-source-line-face '((t))
@@ -3183,11 +3188,14 @@ Source is either a buffer or file name."
   "Toggle clickable breakpoint controls in fringe or margins."
   :lighter nil)
 
+(defun turn-on-dape-breakpoint-mode ()
+  "Turn on `dape-breakpoint-mode' if derived from `prog-mode'."
+  (when (derived-mode-p 'prog-mode)
+    (dape-breakpoint-mode 1)))
+
 ;;;###autoload
 (define-globalized-minor-mode dape-breakpoint-global-mode dape-breakpoint-mode
-  (lambda ()
-    (when (derived-mode-p 'prog-mode)
-      (dape-breakpoint-mode 1))))
+  turn-on-dape-breakpoint-mode)
 
 (defun dape--breakpoint-maybe-remove-ff-hook ()
   "Remove the `find-file-hook' if all breakpoints have buffers."
@@ -5564,6 +5572,7 @@ nil."
 Completes from suggested conjurations, a configuration is suggested if
 it's for current `major-mode' and it's available.
 See `modes' and `ensure' in `dape-configs'."
+  (run-hooks 'dape-read-config-hook)
   (let* ((suggested-configs
           (cl-loop for (name . config) in dape-configs
                    when (and (dape--config-mode-p config)
