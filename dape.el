@@ -1130,10 +1130,8 @@ The indicator is `propertize'd with with FACE."
 
 (defun dape--guess-root (config)
   "Return best guess root path from CONFIG."
-  (if-let* ((command-cwd (plist-get config 'command-cwd))
-            ((stringp command-cwd)))
-      command-cwd
-    (dape-command-cwd)))
+  (or (dape-config-get config 'command-cwd)
+      default-directory))
 
 (defun dape-config-autoport (config)
   "Handle :autoport in CONFIG keys `port', `command-args', and `command-env'.
@@ -2288,7 +2286,7 @@ Killing the adapter and it's CONN."
 If started by an startDebugging request expects PARENT to
 symbol `dape-connection'."
   (unless (plist-get config 'command-cwd)
-    (plist-put config 'command-cwd default-directory))
+    (plist-put config 'command-cwd (dape--guess-root config)))
   (let ((default-directory (plist-get config 'command-cwd))
         (process-environment (cl-copy-list process-environment))
         (command (cons (plist-get config 'command)
@@ -2832,7 +2830,7 @@ Using BUFFER and STR."
 (defun dape--compile (config fn)
   "Start compilation for CONFIG then call FN."
   (let ((default-directory (dape--guess-root config))
-        (command (plist-get config 'compile)))
+        (command (dape-config-get config 'compile)))
     (funcall dape-compile-function command)
     (with-current-buffer (compilation-find-buffer)
       (setq dape--compile-after-fn fn)
@@ -5344,7 +5342,7 @@ CONN is inferred for interactive invocations."
 
 (defun dape-config-get (config prop)
   "Return PROP value in CONFIG evaluated."
-  (dape--config-eval-value (plist-get config prop)))
+  (dape--config-eval-value (plist-get config prop) nil 'skip-interactive))
 
 (defun dape--plistp (object)
   "Non-nil if and only if OBJECT is a valid plist."
@@ -5389,7 +5387,7 @@ non-nil and function uses the minibuffer."
 
 (defun dape--config-eval-1 (config &optional skip-functions skip-interactive)
   "Return evaluated CONFIG.
-See `dape--config-eval' for SKIP-FUNCTIONS and SKIP-INTERACTIVE."
+See `dape--config-eval-value' for SKIP-FUNCTIONS and SKIP-INTERACTIVE."
   (cl-loop for (key value) on config by 'cddr append
            (cond
             ((memql key '(modes fn ensure)) (list key value))
@@ -5397,8 +5395,9 @@ See `dape--config-eval' for SKIP-FUNCTIONS and SKIP-INTERACTIVE."
                    (dape--config-eval-value value
                                             skip-functions
                                             skip-interactive))))))
-(defun dape--config-eval (key options)
-  "Evaluate config with KEY and OPTIONS."
+(defun dape--config-eval (key options &optional skip-functions)
+  "Evaluate config with KEY and OPTIONS.
+See `dape--config-eval-value' for SKIP-FUNCTIONS."
   (let ((base-config (alist-get key dape-configs)))
     (unless base-config
       (user-error "Unable to find `%s' in `dape-configs', available \
@@ -5407,7 +5406,8 @@ configurations: %s"
                                  dape-configs ", ")))
     (dape--config-eval-1 (seq-reduce (apply-partially 'apply 'plist-put)
                                      (nreverse (seq-partition options 2))
-                                     (copy-tree base-config)))))
+                                     (copy-tree base-config))
+                         skip-functions)))
 
 (defun dape--config-from-string (str)
   "Return list of (KEY CONFIG) from STR.
@@ -5620,7 +5620,7 @@ See `modes' and `ensure' in `dape-configs'."
                          (ignore-errors (dape--config-from-string initial-contents))))
               (list
                (dape--config-to-string
-                key (ignore-errors (dape--config-eval key config)))
+                key (ignore-errors (dape--config-eval key config 'skip-functions)))
                (format "%s " key))))))
     (setq dape--minibuffer-last-buffer (current-buffer)
           dape--minibuffer-cache nil)
@@ -5669,7 +5669,9 @@ See `modes' and `ensure' in `dape-configs'."
                nil 'dape-history default-value)))
            (`(,key ,config)
             (dape--config-from-string (substring-no-properties str)))
-           (evaled-config (dape--config-eval key config)))
+           (evaled-config
+            (let ((default-directory (dape--guess-root config)))
+              (dape--config-eval key config))))
         (unless (eq dape-history-add 'input)
           (push (dape--config-to-string key evaled-config) dape-history))
         evaled-config))))
