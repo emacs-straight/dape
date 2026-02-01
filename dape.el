@@ -818,6 +818,14 @@ Debug logging has an noticeable effect on performance."
                                    :extend t))
   "Face used in REPL for non 0 exit codes.")
 
+(defface dape-header-line-active-face '((t :inherit mode-line))
+  "Face for active Dape header tabs.")
+
+(defface dape-header-line-inactive-face '((t :inherit mode-line-inactive))
+  "Face for inactive Dape header tabs.")
+
+(defface dape-header-line-hover-face '((t :inherit mode-line-highlight))
+  "Face for hovered Dape header tabs.")
 
 ;;; Forward declarations
 (defvar hl-line-mode)
@@ -3828,10 +3836,10 @@ buffers get displayed and how they are grouped."
        (cl-loop for (mode index name) in dape--info-buffer-related
                 append
                 `(,(if (dape--info-buffer-p mode index)
-                       (dape--info-header name mode index nil nil 'mode-line)
+                       (dape--info-header name mode index nil nil 'dape-header-line-active-face)
                      (dape--info-header name mode index "mouse-1: select"
-                                        'mode-line-highlight
-                                        'mode-line-inactive))
+                                        'dape-header-line-hover-face
+                                        'dape-header-line-inactive-face))
                   " "))))))
 
 
@@ -4728,7 +4736,8 @@ The search is done backwards from POINT.  The line is marked with
 
 (defun dape--repl-revert-region (&rest _)
   "Revert region by cont text property dape--revert-tag."
-  (when-let* ((fn (get-text-property (point) 'dape--revert-fn))
+  (when-let* ((inhibit-read-only t)
+			  (fn (get-text-property (point) 'dape--revert-fn))
               (start (save-excursion
                        (previous-single-property-change
                         (1+ (point)) 'dape--revert-tag)))
