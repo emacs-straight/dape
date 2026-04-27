@@ -112,34 +112,6 @@
          :pathCat "cat"
          :pathMkfifo "mkfifo"
          :pathPkill "pkill"))
-    ,@(let ((codelldb
-             `( ensure dape-ensure-command
-                command-cwd dape-command-cwd
-                command ,(file-name-concat dape-adapter-dir
-                                           "codelldb"
-                                           "extension"
-                                           "adapter"
-                                           "codelldb")
-                port :autoport
-                :type "lldb"
-                :request "launch"
-                :cwd "."))
-            (common `(:args [] :stopOnEntry nil)))
-        `((codelldb-cc
-           modes (c-mode c-ts-mode c++-mode c++-ts-mode)
-           command-args ("--port" :autoport)
-           ,@codelldb
-           :program "a.out"
-           ,@common)
-          (codelldb-rust
-           modes (rust-mode rust-ts-mode)
-           command-args ("--port" :autoport
-                         "--settings" "{\"sourceLanguages\":[\"rust\"]}")
-           ,@codelldb
-           :program (file-name-concat "target" "debug"
-                                      (car (last (file-name-split
-                                                  (directory-file-name (dape-cwd))))))
-           ,@common)))
     (cpptools
      modes (c-mode c-ts-mode c++-mode c++-ts-mode)
      ensure dape-ensure-command
@@ -1277,16 +1249,28 @@ as is."
   "Kill all dape buffers.
 On SKIP-PROCESS-BUFFERS skip deletion of buffers which has processes."
   (cl-loop for buffer in (buffer-list)
-           when (and (not (and skip-process-buffers
-                               (get-buffer-process buffer)))
-                     (when-let* ((name (buffer-name buffer)))
-                       (string-match-p "\\*dape-.+\\*\\(<[0-9]+>\\)?$" name)))
-           do (condition-case err
-                  (let ((window (get-buffer-window buffer)))
-                    (kill-buffer buffer)
-                    (when (window-live-p window)
-                      (delete-window window)))
-                (error (message (error-message-string err))))))
+           when (and
+                 (buffer-live-p buffer)
+                 (buffer-match-p
+                  '(or "\\*dape-source .+\\*"
+                       "\\*dape-.+ events\\*"
+                       "\\*dape-.+ output\\*"
+                       "\\*dape-.+ stderr\\*"
+                       (major-mode . dape-repl-mode)
+                       (major-mode . dape-memory-mode)
+                       (major-mode . dape-shell-mode)
+                       (major-mode . dape-disassemble-mode)
+                       (derived-mode . dape-info-parent-mode))
+                  buffer)
+                 (not (and skip-process-buffers
+                           (get-buffer-process buffer))))
+           do
+           (condition-case err
+               (let ((window (get-buffer-window buffer)))
+                 (kill-buffer buffer)
+                 (when (window-live-p window)
+                   (delete-window window)))
+             (error (message (error-message-string err))))))
 
 (defun dape--display-buffer (buffer)
   "Display BUFFER according to `dape-buffer-window-arrangement'."
@@ -2610,7 +2594,8 @@ CONN is inferred for interactive invocations."
     (user-error "Thread is stopped"))
   (dape--with-request-bind
       (_body error)
-      (dape-request conn :pause (dape--thread-id-object conn))
+      (dape-request conn :pause (or (dape--thread-id-object conn)
+                                    '(:threadId 0)))
     (when error
       (error "Failed to pause: %s" error))))
 
@@ -2642,11 +2627,28 @@ SKIP-COMPILE is used internally for recursive calls."
           (dape-active-mode +1))
         (setf (dape--restart-in-progress-p conn) nil))))
    (;; Use previous connections configuration
-    dape--connections (dape (dape--config (car dape--connections))))
+    dape--connections
+    (let ((conn (or (and conn (dape--root-of conn))
+                    (car dape--connections))))
+      (dape--with-request (dape-kill conn)
+        (dape (dape--config conn)))))
    (;; Use history
     dape-history
     (dape (apply #'dape--config-eval (dape--config-from-string (car dape-history)))))
    ((user-error "Unable to derive session to restart, run `dape'"))))
+
+(defun dape--shutdown (conn)
+  "Shutdown CONN and delete its jsonrpc buffers."
+  ;; Signal the process first so the sentinel fires as iter 0 in
+  ;; `jsonrpc-shutdown'.  Preventing the misleading sentinel warning
+  ;; (DAP has no client-initiated shutdown).
+  (unwind-protect
+      (let ((proc (jsonrpc--process conn)))
+        (ignore-errors (accept-process-output nil 0.2)) ; pump timers before deleting
+        (delete-process proc)
+        (jsonrpc-shutdown conn t))
+    (unless dape-debug
+      (kill-buffer (jsonrpc-events-buffer conn)))))
 
 (defun dape-kill (conn &optional cb with-disconnect)
   "Kill debug session.
@@ -2664,8 +2666,8 @@ terminate.  CONN is inferred for interactive invocations."
       ;; way if the request timeout, otherwise we might force the
       ;; user to kill the process in some other way.
       (if (and error (not (eq error dape--timeout-error)))
-          (dape-kill cb 'with-disconnect)
-        (jsonrpc-shutdown conn)
+          (dape-kill conn cb 'with-disconnect)
+        (dape--shutdown conn)
         (dape--request-continue cb))))
    ((and conn (jsonrpc-running-p conn))
     (dape--with-request
@@ -2673,7 +2675,7 @@ terminate.  CONN is inferred for interactive invocations."
                       `( :restart :json-false
                          ,@(when (dape--capable-p conn :supportTerminateDebuggee)
                              '(:terminateDebuggee t))))
-      (jsonrpc-shutdown conn)
+      (dape--shutdown conn)
       (dape--request-continue cb)))
    (t
     (dape--request-continue cb))))
@@ -2686,7 +2688,7 @@ connection.  CONN is inferred for interactive invocations."
   (dape--kill-buffers 'skip-process-buffers)
   (dape--with-request
       (dape-request conn :disconnect '(:terminateDebuggee :json-false))
-    (jsonrpc-shutdown conn)
+    (dape--shutdown conn)
     (dape--kill-buffers)))
 
 (defun dape-quit ()
@@ -2813,7 +2815,7 @@ When SKIP-NOTIFY is non-nil, do not notify adapters about removal."
                         for conn in dape--connections
                         when (eq (dape--root-of conn) root)
                         collect conn)))
-          (dape--live-connection 'last)))
+          (or (dape--live-connection 'last t) conn)))
   (when-let* ((buffer (dape--shell-buffer conn)))
     (dape--display-buffer buffer))
   (dape--update dape--connection-selected nil t)
@@ -3813,7 +3815,7 @@ Buffer is displayed with `dape-display-source-buffer-action'."
 (defvar dape--info-buffer-display-history nil "History list in (MODE INDEX).")
 
 (defun dape--info-buffer-list ()
-  "Return all live `dape-info-parent-mode'."
+  "Return all live `dape-info-parent-mode' buffers."
   (setq dape--info-buffers
         (cl-delete-if-not #'buffer-live-p dape--info-buffers)))
 
