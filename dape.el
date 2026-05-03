@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.26.0
+;; Version: 0.27.0
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -222,21 +222,21 @@
 		command-args ("--interpreter=dap")
 		:request "launch"
 		:stopAtBeginningOfMainSubprogram nil)))
-	     `((go-gdb-test ,@gdb-common
-			    modes (go-mode go-ts-mode)
-			    command-cwd (file-name-directory (buffer-file-name))
-			    compile (format "go test -c -o %s -gcflags='all=-N -l'"
-					    (expand-file-name "__test.bin" temporary-file-directory)) ;; compile without optimizations
-			    :program (expand-file-name "__test.bin" temporary-file-directory)
-			    :args [])
-	       (go-gdb ,@gdb-common
+	`((gdb-go-test ,@gdb-common
 		       modes (go-mode go-ts-mode)
 		       command-cwd (file-name-directory (buffer-file-name))
-		       compile (format "go build -o %s -gcflags='all=-N -l'"
-				       (expand-file-name "__binary.bin" temporary-file-directory)) ;; compile without optimizations
-		       :request "launch"
-		       :program (expand-file-name "__binary.bin" temporary-file-directory)
-		       :args [])))
+		       compile (format "go test -c -o %s -gcflags='all=-N -l'"
+				       (expand-file-name "__test.bin" temporary-file-directory)) ;; compile without optimizations
+		       :program (expand-file-name "__test.bin" temporary-file-directory)
+		       :args [])
+	  (gdb-go ,@gdb-common
+		  modes (go-mode go-ts-mode)
+		  command-cwd (file-name-directory (buffer-file-name))
+		  compile (format "go build -o %s -gcflags='all=-N -l'"
+				  (expand-file-name "__binary.bin" temporary-file-directory)) ;; compile without optimizations
+		  :request "launch"
+		  :program (expand-file-name "__binary.bin" temporary-file-directory)
+		  :args [])))
     (godot
      modes (gdscript-mode)
      port 6006
