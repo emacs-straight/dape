@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Pettersson <daniel@dpettersson.net>
 ;; Created: 2023
 ;; License: GPL-3.0-or-later
-;; Version: 0.27.0
+;; Version: 0.27.1
 ;; Homepage: https://github.com/svaante/dape
 ;; Package-Requires: ((emacs "29.1") (jsonrpc "1.0.25"))
 
@@ -3023,12 +3023,12 @@ For more information see `dape-configs'."
                       (copy-tree config))))
   (if (and (not skip-compile) (plist-get config 'compile))
       (dape--compile config (lambda () (dape config 'skip-compile)))
+    ;; Run start hooks before connection creation so that the REPL
+    ;; buffer exists when `dape--create-connection' emits messages.
+    (run-hooks 'dape-start-hook)
     (let ((conn (dape--create-connection config)))
       (push conn dape--connections)
       (setq dape--connection-selected conn)
-      ;; Hooks run after connection is registered so `dape-repl'
-      ;; and `dape-info' can use the active session.
-      (run-hooks 'dape-start-hook)
       (dape--start-debugging conn))))
 
 
